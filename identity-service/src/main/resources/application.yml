@@ -47,8 +47,14 @@ app:
   base-url: ${APP_BASE_URL:http://localhost:3000}
   otp:
     expiry-minutes: 5
-    resend-cooldown-seconds: 30
+    resend-cooldown-seconds: 60
   name: ${APP_NAME:MyURL}
+  # CAPTCHA configuration (OWASP ASVS V2.1 — bot detection on auth endpoints)
+  # Provider: none (disabled), recaptcha-v3, or hcaptcha
+  captcha:
+    provider: ${CAPTCHA_PROVIDER:none}
+    secret-key: ${CAPTCHA_SECRET_KEY:}
+    score-threshold: ${CAPTCHA_SCORE_THRESHOLD:0.5}
 
 # JWT RSA Key Configuration
 # Keys are persisted to disk so they survive restarts.

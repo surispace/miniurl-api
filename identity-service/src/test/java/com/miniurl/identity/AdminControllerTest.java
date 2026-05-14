@@ -9,6 +9,7 @@ import com.miniurl.identity.entity.User;
 import com.miniurl.identity.entity.UserStatus;
 import com.miniurl.identity.repository.RoleRepository;
 import com.miniurl.identity.repository.UserRepository;
+import com.miniurl.identity.service.OtpService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -48,6 +49,9 @@ class AdminControllerTest {
 
     @MockBean
     private RoleRepository roleRepository;
+
+    @MockBean
+    private OtpService otpService;
 
     private User testUser;
     private User adminUser;

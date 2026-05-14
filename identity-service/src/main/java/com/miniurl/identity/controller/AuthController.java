@@ -19,9 +19,11 @@ import com.miniurl.identity.exception.ResourceNotFoundException;
 import com.miniurl.identity.exception.UnauthorizedException;
 import com.miniurl.identity.repository.UserRepository;
 import com.miniurl.identity.service.AuthService;
+import com.miniurl.identity.service.CaptchaService;
 import com.miniurl.identity.service.EmailInviteService;
 import com.miniurl.identity.service.JwtService;
 import com.miniurl.identity.service.TokenService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
@@ -30,9 +32,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.Duration;
-import java.time.LocalDateTime;
 import java.util.Map;
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -47,9 +48,14 @@ public class AuthController {
     private final JwtService jwtService;
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final CaptchaService captchaService;
 
     @PostMapping("/signup")
-    public ResponseEntity<ApiResponse<JwtAuthResponse>> signup(@Valid @RequestBody SignupRequest request) {
+    public ResponseEntity<ApiResponse<JwtAuthResponse>> signup(@Valid @RequestBody SignupRequest request,
+                                                                HttpServletRequest httpRequest) {
+        // CAPTCHA verification (OWASP ASVS V2.1 — bot detection on auth endpoints)
+        captchaService.verifyCaptcha(request.getCaptchaToken(), httpRequest.getRemoteAddr());
+
         User user = authService.registerUser(
             request.getFirstName(),
             request.getLastName(),
@@ -57,7 +63,8 @@ public class AuthController {
             request.getPassword(),
             request.getInvitationToken()
         );
-        String jwt = jwtService.generateToken(new UserPrincipal(user));
+        // Include tokenVersion for revocation support (Issue 3)
+        String jwt = jwtService.generateToken(new UserPrincipal(user), user.getTokenVersion());
         JwtAuthResponse response = new JwtAuthResponse(
             jwt,
             user.getUsername(),
@@ -82,7 +89,11 @@ public class AuthController {
     }
 
     @PostMapping("/forgot-password")
-    public ResponseEntity<ApiResponse<Void>> forgotPassword(@Valid @RequestBody ForgotPasswordRequest request) {
+    public ResponseEntity<ApiResponse<Void>> forgotPassword(@Valid @RequestBody ForgotPasswordRequest request,
+                                                             HttpServletRequest httpRequest) {
+        // CAPTCHA verification (OWASP ASVS V2.1 — bot detection on auth endpoints)
+        captchaService.verifyCaptcha(request.getCaptchaToken(), httpRequest.getRemoteAddr());
+
         authService.requestPasswordReset(request.getEmail());
         return ResponseEntity.ok(ApiResponse.success("Password reset link sent to email"));
     }
@@ -94,34 +105,45 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<ApiResponse<LoginOtpResponse>> login(@Valid @RequestBody LoginRequest request) {
-        User user = userRepository.findByUsername(request.getUsername())
-            .or(() -> userRepository.findByEmail(request.getUsername()))
-            .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+    public ResponseEntity<ApiResponse<LoginOtpResponse>> login(@Valid @RequestBody LoginRequest request,
+                                                                HttpServletRequest httpRequest) {
+        // CAPTCHA verification (OWASP ASVS V2.1 — bot detection on auth endpoints)
+        captchaService.verifyCaptcha(request.getCaptchaToken(), httpRequest.getRemoteAddr());
 
-        // Check account lockout before password validation
-        if (!user.isLoginAttemptAllowed()) {
-            long remainingSeconds = 0;
-            if (user.getLockoutTime() != null) {
-                remainingSeconds = Duration.between(LocalDateTime.now(), user.getLockoutTime()).getSeconds();
-            }
-            log.warn("Login blocked: account locked for user: {}", user.getUsername());
-            throw new AccountLockedException(
-                "Account is temporarily locked. Please try again in " + remainingSeconds + " seconds.",
-                remainingSeconds);
-        }
+        // Anti-enumeration: always return the same generic response regardless of
+        // whether the user exists, password is wrong, or account is rate-limited.
+        // OWASP ASVS V2.1.1 — responses must be identical in timing and content.
 
-        if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
-            // Increment failed attempts on wrong password
-            user.incrementFailedLoginAttempts();
-            userRepository.save(user);
-            log.warn("Failed login attempt {} for user: {}", user.getFailedLoginAttempts(), user.getUsername());
+        Optional<User> userOpt = userRepository.findByUsername(request.getUsername())
+            .or(() -> userRepository.findByEmail(request.getUsername()));
+
+        if (userOpt.isEmpty()) {
+            // Simulate password check to prevent timing-based enumeration
+            passwordEncoder.matches(request.getPassword(),
+                "$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            log.info("Login attempt for non-existent user: {}", request.getUsername());
             throw new UnauthorizedException("Invalid credentials");
         }
 
-        // Reset failed attempts on successful password validation
-        user.resetFailedLoginAttempts();
-        userRepository.save(user);
+        User user = userOpt.get();
+
+        // Check Redis-based rate limiting (replaces hard lockout — NIST SP 800-63B §5.2.2)
+        if (!authService.checkLoginRateLimit(user.getId())) {
+            long retryAfter = authService.getLoginRateLimitRetrySeconds(user.getId());
+            log.warn("Login rate-limited for user: {}", user.getUsername());
+            // Same generic response — don't reveal rate limit status
+            throw new UnauthorizedException("Invalid credentials");
+        }
+
+        if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
+            // Track failed attempt in Redis rate limiter
+            authService.recordFailedLoginAttempt(user.getId());
+            log.warn("Failed login attempt for user: {}", user.getUsername());
+            throw new UnauthorizedException("Invalid credentials");
+        }
+
+        // Reset rate limiter on successful password validation
+        authService.resetLoginRateLimit(user.getId());
 
         authService.sendLoginOtp(user);
         LoginOtpResponse response = new LoginOtpResponse("OTP sent to your email", user.getEmail());
@@ -130,23 +152,36 @@ public class AuthController {
 
     @PostMapping("/verify-otp")
     public ResponseEntity<ApiResponse<JwtAuthResponse>> verifyOtp(@Valid @RequestBody OtpVerificationRequest request) {
-        // Check lockout before OTP verification (prevents bypassing lockout)
-        User user = userRepository.findByUsername(request.getUsername())
-            .or(() -> userRepository.findByEmail(request.getUsername()))
-            .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+        // Anti-enumeration: don't reveal whether user exists
+        Optional<User> userOpt = userRepository.findByUsername(request.getUsername())
+            .or(() -> userRepository.findByEmail(request.getUsername()));
 
-        if (!user.isLoginAttemptAllowed()) {
-            long remainingSeconds = 0;
-            if (user.getLockoutTime() != null) {
-                remainingSeconds = Duration.between(LocalDateTime.now(), user.getLockoutTime()).getSeconds();
-            }
-            throw new AccountLockedException(
-                "Account is temporarily locked. Please try again in " + remainingSeconds + " seconds.",
-                remainingSeconds);
+        if (userOpt.isEmpty()) {
+            throw new UnauthorizedException("Invalid credentials");
         }
 
-        user = authService.verifyLoginOtp(request.getUsername(), request.getOtp());
-        String jwt = jwtService.generateToken(new UserPrincipal(user));
+        User user = userOpt.get();
+
+        // Check OTP verification rate limit (OWASP ASVS V2.8)
+        if (!authService.checkOtpRateLimit(user.getId())) {
+            long retryAfter = authService.getOtpRateLimitRetrySeconds(user.getId());
+            log.warn("OTP verification rate-limited for user: {}", user.getUsername());
+            throw new UnauthorizedException("Invalid credentials");
+        }
+
+        try {
+            user = authService.verifyLoginOtp(request.getUsername(), request.getOtp());
+        } catch (UnauthorizedException e) {
+            // Track failed OTP attempt
+            authService.recordFailedOtpAttempt(user.getId());
+            throw e;
+        }
+
+        // Reset OTP rate limiter on success
+        authService.resetOtpRateLimit(user.getId());
+
+        // Include tokenVersion in JWT for revocation support (NIST SP 800-63B §5.2.5)
+        String jwt = jwtService.generateToken(new UserPrincipal(user), user.getTokenVersion());
         JwtAuthResponse response = new JwtAuthResponse(
             jwt,
             user.getUsername(),
@@ -160,19 +195,12 @@ public class AuthController {
 
     @PostMapping("/resend-otp")
     public ResponseEntity<ApiResponse<Void>> resendOtp(@Valid @RequestBody ResendOtpRequest request) {
-        // Check lockout before resending OTP
-        User user = userRepository.findByUsername(request.getUsername())
-            .or(() -> userRepository.findByEmail(request.getUsername()))
-            .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+        // Anti-enumeration: don't reveal whether user exists
+        Optional<User> userOpt = userRepository.findByUsername(request.getUsername())
+            .or(() -> userRepository.findByEmail(request.getUsername()));
 
-        if (!user.isLoginAttemptAllowed()) {
-            long remainingSeconds = 0;
-            if (user.getLockoutTime() != null) {
-                remainingSeconds = Duration.between(LocalDateTime.now(), user.getLockoutTime()).getSeconds();
-            }
-            throw new AccountLockedException(
-                "Account is temporarily locked. Please try again in " + remainingSeconds + " seconds.",
-                remainingSeconds);
+        if (userOpt.isEmpty()) {
+            throw new UnauthorizedException("Invalid credentials");
         }
 
         authService.resendLoginOtp(request.getUsername());

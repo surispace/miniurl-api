@@ -8,6 +8,7 @@ import com.miniurl.identity.entity.User;
 import com.miniurl.identity.entity.UserStatus;
 import com.miniurl.identity.repository.UserRepository;
 import com.miniurl.identity.service.AuthService;
+import com.miniurl.identity.service.CaptchaService;
 import com.miniurl.identity.service.EmailInviteService;
 import com.miniurl.identity.service.JwtService;
 import com.miniurl.identity.service.TokenService;
@@ -63,6 +64,9 @@ class AuthControllerDeleteAccountTest {
 
     @MockBean
     private PasswordEncoder passwordEncoder;
+
+    @MockBean
+    private CaptchaService captchaService;
 
     private User testUser;
     private static final String VALID_JWT = "eyJhbGciOiJSUzI1NiJ9.validJwt";

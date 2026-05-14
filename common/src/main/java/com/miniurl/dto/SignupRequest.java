@@ -40,6 +40,11 @@ public class SignupRequest {
             required = true)
     private String invitationToken;
 
+    @Size(max = 2000, message = "CAPTCHA token must be 2000 characters or less")
+    @Schema(description = "CAPTCHA token from client-side widget (required when CAPTCHA is enabled)",
+            example = "03AGdBq24...")
+    private String captchaToken;
+
     public SignupRequest() {}
 
     public SignupRequest(String firstName, String lastName, String username, String password, String invitationToken) {
@@ -64,4 +69,7 @@ public class SignupRequest {
 
     public String getInvitationToken() { return invitationToken; }
     public void setInvitationToken(String invitationToken) { this.invitationToken = invitationToken; }
+
+    public String getCaptchaToken() { return captchaToken; }
+    public void setCaptchaToken(String captchaToken) { this.captchaToken = captchaToken; }
 }

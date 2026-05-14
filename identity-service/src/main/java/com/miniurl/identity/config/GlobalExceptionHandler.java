@@ -5,6 +5,7 @@ import com.miniurl.identity.exception.AccountLockedException;
 import com.miniurl.identity.exception.RateLimitCooldownException;
 import com.miniurl.identity.exception.ResourceNotFoundException;
 import com.miniurl.identity.exception.UnauthorizedException;
+import com.miniurl.identity.service.CaptchaService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -51,6 +52,13 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(RateLimitCooldownException.class)
     public ResponseEntity<ApiResponse<Void>> handleRateLimitCooldown(RateLimitCooldownException ex) {
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(CaptchaService.CaptchaValidationException.class)
+    public ResponseEntity<ApiResponse<Void>> handleCaptchaValidation(CaptchaService.CaptchaValidationException ex) {
+        log.warn("CAPTCHA validation failed: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiResponse.error(ex.getMessage()));
     }
 

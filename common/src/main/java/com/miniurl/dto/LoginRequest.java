@@ -16,6 +16,11 @@ public class LoginRequest {
     @Size(max = 255, message = "Password must be 255 characters or less")
     @Schema(description = "User password (max 255 chars)", example = "MyP@ssw0rd")
     private String password;
+
+    @Size(max = 2000, message = "CAPTCHA token must be 2000 characters or less")
+    @Schema(description = "CAPTCHA token from client-side widget (required when CAPTCHA is enabled)",
+            example = "03AGdBq24...")
+    private String captchaToken;
     
     public LoginRequest() {}
     
@@ -29,4 +34,7 @@ public class LoginRequest {
     
     public String getPassword() { return password; }
     public void setPassword(String password) { this.password = password; }
+
+    public String getCaptchaToken() { return captchaToken; }
+    public void setCaptchaToken(String captchaToken) { this.captchaToken = captchaToken; }
 }

@@ -16,6 +16,7 @@ import com.miniurl.identity.repository.UserRepository;
 import com.miniurl.identity.repository.VerificationTokenRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,8 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class AuthService {
@@ -41,12 +41,23 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final EmailInviteService emailInviteService;
     private final OtpService otpService;
+    private final RedisTemplate<String, String> redisTemplate;
 
     private final SecureRandom secureRandom = new SecureRandom();
 
-    // Email bombing protection - track password reset requests per email
-    private final ConcurrentMap<String, LocalDateTime> passwordResetRequests = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, LocalDateTime> signupRequests = new ConcurrentHashMap<>();
+    // Redis key prefixes for rate limiting (Issue 7: moved from in-memory to Redis)
+    private static final String LOGIN_RATE_LIMIT_PREFIX = "rate:login:";
+    private static final String OTP_RATE_LIMIT_PREFIX = "rate:otp:";
+    private static final String PASSWORD_RESET_RATE_PREFIX = "rate:pwreset:";
+    private static final String SIGNUP_RATE_PREFIX = "rate:signup:";
+
+    // Rate limit configuration
+    private static final int LOGIN_MAX_ATTEMPTS = 5;
+    private static final int LOGIN_WINDOW_MINUTES = 15;
+    private static final int OTP_MAX_ATTEMPTS = 5;
+    private static final int OTP_WINDOW_MINUTES = 5;
+    private static final int PASSWORD_RESET_COOLDOWN_MINUTES = 20;
+    private static final int SIGNUP_COOLDOWN_MINUTES = 12;
 
     public AuthService(UserRepository userRepository,
                       RoleRepository roleRepository,
@@ -55,7 +66,8 @@ public class AuthService {
                       TokenService tokenService,
                       PasswordEncoder passwordEncoder,
                       EmailInviteService emailInviteService,
-                      OtpService otpService) {
+                      OtpService otpService,
+                      RedisTemplate<String, String> redisTemplate) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.tokenRepository = tokenRepository;
@@ -64,6 +76,7 @@ public class AuthService {
         this.passwordEncoder = passwordEncoder;
         this.emailInviteService = emailInviteService;
         this.otpService = otpService;
+        this.redisTemplate = redisTemplate;
     }
 
     /**
@@ -91,6 +104,91 @@ public class AuthService {
         }
     }
 
+    // ==================== Redis Rate Limiting Helpers (Issue 7) ====================
+
+    /**
+     * Check if a rate-limited action is allowed using a sliding window counter in Redis.
+     * @param prefix Redis key prefix
+     * @param id User or email identifier
+     * @param maxAttempts Maximum allowed attempts in the window
+     * @param windowMinutes Window duration in minutes
+     * @return true if allowed, false if rate limited
+     */
+    private boolean checkRateLimit(String prefix, String id, int maxAttempts, int windowMinutes) {
+        String key = prefix + id;
+        String countStr = redisTemplate.opsForValue().get(key);
+        int count = countStr != null ? Integer.parseInt(countStr) : 0;
+        return count < maxAttempts;
+    }
+
+    /**
+     * Record an attempt for a rate-limited action.
+     */
+    private void recordRateLimitAttempt(String prefix, String id, int windowMinutes) {
+        String key = prefix + id;
+        redisTemplate.opsForValue().increment(key);
+        // Set expiry on first attempt
+        Long ttl = redisTemplate.getExpire(key, TimeUnit.SECONDS);
+        if (ttl == null || ttl <= 0) {
+            redisTemplate.expire(key, windowMinutes, TimeUnit.MINUTES);
+        }
+    }
+
+    /**
+     * Reset rate limit counter for a given key.
+     */
+    private void resetRateLimit(String prefix, String id) {
+        redisTemplate.delete(prefix + id);
+    }
+
+    /**
+     * Get remaining seconds until rate limit resets.
+     */
+    private long getRateLimitRetrySeconds(String prefix, String id) {
+        Long ttl = redisTemplate.getExpire(prefix + id, TimeUnit.SECONDS);
+        return ttl != null && ttl > 0 ? ttl : 0;
+    }
+
+    // ==================== Login Rate Limiting (Issue 4: replaces hard lockout) ====================
+
+    public boolean checkLoginRateLimit(Long userId) {
+        return checkRateLimit(LOGIN_RATE_LIMIT_PREFIX, String.valueOf(userId),
+                LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_MINUTES);
+    }
+
+    public long getLoginRateLimitRetrySeconds(Long userId) {
+        return getRateLimitRetrySeconds(LOGIN_RATE_LIMIT_PREFIX, String.valueOf(userId));
+    }
+
+    public void recordFailedLoginAttempt(Long userId) {
+        recordRateLimitAttempt(LOGIN_RATE_LIMIT_PREFIX, String.valueOf(userId), LOGIN_WINDOW_MINUTES);
+    }
+
+    public void resetLoginRateLimit(Long userId) {
+        resetRateLimit(LOGIN_RATE_LIMIT_PREFIX, String.valueOf(userId));
+    }
+
+    // ==================== OTP Verification Rate Limiting (Issue 2) ====================
+
+    public boolean checkOtpRateLimit(Long userId) {
+        return checkRateLimit(OTP_RATE_LIMIT_PREFIX, String.valueOf(userId),
+                OTP_MAX_ATTEMPTS, OTP_WINDOW_MINUTES);
+    }
+
+    public long getOtpRateLimitRetrySeconds(Long userId) {
+        return getRateLimitRetrySeconds(OTP_RATE_LIMIT_PREFIX, String.valueOf(userId));
+    }
+
+    public void recordFailedOtpAttempt(Long userId) {
+        recordRateLimitAttempt(OTP_RATE_LIMIT_PREFIX, String.valueOf(userId), OTP_WINDOW_MINUTES);
+    }
+
+    public void resetOtpRateLimit(Long userId) {
+        resetRateLimit(OTP_RATE_LIMIT_PREFIX, String.valueOf(userId));
+    }
+
+    // ==================== User Registration ====================
+
     /**
      * Register a new user with email verification and signup rate limiting
      * @param firstName User's first name
@@ -111,9 +209,8 @@ public class AuthService {
         String email = invite.getEmail();
         logger.info("Valid invitation token for email: {}", email);
 
-        // Signup rate limiting - max 5 requests per hour per email
-        LocalDateTime lastSignup = signupRequests.get(email.toLowerCase());
-        if (lastSignup != null && LocalDateTime.now().isBefore(lastSignup.plusMinutes(12))) {
+        // Signup rate limiting via Redis (Issue 7: moved from in-memory ConcurrentHashMap)
+        if (!checkRateLimit(SIGNUP_RATE_PREFIX, email.toLowerCase(), 1, SIGNUP_COOLDOWN_MINUTES)) {
             throw new UnauthorizedException("Too many signup attempts. Please try again later.");
         }
 
@@ -201,8 +298,8 @@ public class AuthService {
         // Mark email as verified in Redis (all users come via invite)
         otpService.markEmailVerified(user.getId());
 
-        // Track signup for rate limiting
-        signupRequests.put(email.toLowerCase(), LocalDateTime.now());
+        // Track signup for rate limiting in Redis
+        recordRateLimitAttempt(SIGNUP_RATE_PREFIX, email.toLowerCase(), SIGNUP_COOLDOWN_MINUTES);
 
         logger.info("User registered: {} ({}) - Returning: {}, Invited: {}", username, email, isReturningUser, isInvitedUser);
 
@@ -230,9 +327,6 @@ public class AuthService {
             logger.warn("Failed to send congratulations email event to {}: {}", email, e.getMessage());
             // Don't fail the registration, just log the error
         }
-
-        // Cleanup old entries
-        cleanupOldRateLimitEntries();
 
         return user;
     }
@@ -310,14 +404,14 @@ public class AuthService {
     }
 
     /**
-     * Request password reset with email bombing protection
+     * Request password reset with email bombing protection via Redis (Issue 7).
      */
     @Transactional
     public void requestPasswordReset(String email) {
-        // Email bombing protection - max 1 request per 20 minutes
-        LocalDateTime lastRequest = passwordResetRequests.get(email.toLowerCase());
-        if (lastRequest != null && LocalDateTime.now().isBefore(lastRequest.plusMinutes(20))) {
-            long minutesLeft = java.time.Duration.between(LocalDateTime.now(), lastRequest.plusMinutes(20)).toMinutes() + 1;
+        // Email bombing protection via Redis - max 1 request per 20 minutes
+        if (!checkRateLimit(PASSWORD_RESET_RATE_PREFIX, email.toLowerCase(), 1, PASSWORD_RESET_COOLDOWN_MINUTES)) {
+            long retrySeconds = getRateLimitRetrySeconds(PASSWORD_RESET_RATE_PREFIX, email.toLowerCase());
+            long minutesLeft = (retrySeconds / 60) + 1;
             throw new RateLimitCooldownException(
                 String.format("Password reset rate limit exceeded. Please try again in %d %s.",
                     minutesLeft, minutesLeft == 1 ? "minute" : "minutes")
@@ -326,13 +420,12 @@ public class AuthService {
 
         // Track request for rate limiting BEFORE checking if user exists
         // This prevents timing-based enumeration
-        passwordResetRequests.put(email.toLowerCase(), LocalDateTime.now());
+        recordRateLimitAttempt(PASSWORD_RESET_RATE_PREFIX, email.toLowerCase(), PASSWORD_RESET_COOLDOWN_MINUTES);
 
         // Anti-enumeration: don't reveal whether the email exists
         Optional<User> userOpt = userRepository.findByEmail(email);
         if (userOpt.isEmpty()) {
             logger.info("Password reset requested for non-existent email: {}", email);
-            cleanupOldRateLimitEntries();
             return;
         }
 
@@ -340,7 +433,6 @@ public class AuthService {
 
         if (user.getStatus() != UserStatus.ACTIVE) {
             logger.info("Password reset requested for inactive account: {}", email);
-            cleanupOldRateLimitEntries();
             return;
         }
 
@@ -364,9 +456,6 @@ public class AuthService {
         }
 
         logger.info("Password reset requested for: {}", email);
-
-        // Cleanup old entries periodically
-        cleanupOldRateLimitEntries();
     }
 
     /**
@@ -438,7 +527,9 @@ public class AuthService {
 
         // Soft delete
         user.setStatus(UserStatus.DELETED);
+        user.incrementTokenVersion();  // Invalidate all existing tokens on deletion
         userRepository.save(user);
+        otpService.storeTokenVersionByUsername(user.getUsername(), user.getTokenVersion());
 
         logger.info("Account soft-deleted for user: {}", user.getUsername());
     }
@@ -503,23 +594,13 @@ public class AuthService {
     }
 
     /**
-     * Cleanup old rate limit entries to prevent memory leaks
-     */
-    private void cleanupOldRateLimitEntries() {
-        LocalDateTime cutoff = LocalDateTime.now().minusHours(2);
-
-        passwordResetRequests.entrySet().removeIf(entry -> entry.getValue().isBefore(cutoff));
-        signupRequests.entrySet().removeIf(entry -> entry.getValue().isBefore(cutoff));
-    }
-
-    /**
      * Send OTP for 2FA login. Reuses existing valid OTP if available, generates new one otherwise.
      * Enforces cooldown between OTP sends via Redis.
      * @param user The authenticated user
      * @throws RateLimitCooldownException if called within cooldown period of last OTP send
      */
     public void sendLoginOtp(User user) {
-        // Check cooldown via Redis
+        // Check cooldown via Redis (Issue 5: cooldown now 60s, applied consistently)
         if (!otpService.trySetCooldown(user.getId())) {
             long remaining = otpService.getCooldownRemainingSeconds(user.getId());
             throw new RateLimitCooldownException(
@@ -590,7 +671,7 @@ public class AuthService {
             throw new UnauthorizedException("No OTP generated. Please login again.");
         }
 
-        // Check resend cooldown via Redis
+        // Check resend cooldown via Redis (Issue 5: 60s cooldown)
         if (!otpService.trySetCooldown(user.getId())) {
             long remaining = otpService.getCooldownRemainingSeconds(user.getId());
             throw new RateLimitCooldownException(

@@ -112,4 +112,28 @@ public class OtpService {
         redisTemplate.delete(EMAIL_VERIFIED_PREFIX + userId);
         logger.debug("Email verified marker deleted for user {}", userId);
     }
+
+    // ==================== Token Version (Issue 3: revocation support) ====================
+
+    private static final String TOKEN_VERSION_PREFIX = "user:tokenVersion:";
+
+    /**
+     * Store the current token version for a user in Redis.
+     * The gateway's TokenVersionValidator checks this against the JWT's tokenVersion claim.
+     * Called whenever tokenVersion is incremented (password change, account deactivation).
+     */
+    public void storeTokenVersion(Long userId, int tokenVersion) {
+        String key = TOKEN_VERSION_PREFIX + userId;
+        redisTemplate.opsForValue().set(key, String.valueOf(tokenVersion));
+        logger.debug("Token version {} stored for user {}", tokenVersion, userId);
+    }
+
+    /**
+     * Store token version by username (for gateway lookup by JWT subject).
+     */
+    public void storeTokenVersionByUsername(String username, int tokenVersion) {
+        String key = TOKEN_VERSION_PREFIX + username;
+        redisTemplate.opsForValue().set(key, String.valueOf(tokenVersion));
+        logger.debug("Token version {} stored for username {}", tokenVersion, username);
+    }
 }

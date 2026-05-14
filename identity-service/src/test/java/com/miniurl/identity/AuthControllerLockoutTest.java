@@ -10,6 +10,7 @@ import com.miniurl.identity.entity.User;
 import com.miniurl.identity.entity.UserStatus;
 import com.miniurl.identity.repository.UserRepository;
 import com.miniurl.identity.service.AuthService;
+import com.miniurl.identity.service.CaptchaService;
 import com.miniurl.identity.service.EmailInviteService;
 import com.miniurl.identity.service.JwtService;
 import com.miniurl.identity.service.TokenService;
@@ -26,20 +27,24 @@ import org.springframework.http.MediaType;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
-import java.time.LocalDateTime;
 import java.util.Optional;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+/**
+ * Tests for Redis-based rate limiting on auth endpoints.
+ *
+ * After Issue 4 fix: hard lockout (5 failures → 5-min lock, 423 status) was replaced
+ * with Redis sliding-window rate limiting (NIST SP 800-63B §5.2.2).
+ * All failure responses now return 401 "Invalid credentials" for anti-enumeration.
+ */
 @WebMvcTest(AuthController.class)
 @AutoConfigureMockMvc(addFilters = false)
 @Import(GlobalExceptionHandler.class)
-@DisplayName("AuthController Lockout Tests")
+@DisplayName("AuthController Rate Limiting Tests")
 class AuthControllerLockoutTest {
 
     @Autowired
@@ -66,8 +71,10 @@ class AuthControllerLockoutTest {
     @MockBean
     private PasswordEncoder passwordEncoder;
 
+    @MockBean
+    private CaptchaService captchaService;
+
     private User activeUser;
-    private User lockedUser;
 
     @BeforeEach
     void setUp() {
@@ -80,53 +87,43 @@ class AuthControllerLockoutTest {
                 .password("encodedPassword")
                 .status(UserStatus.ACTIVE)
                 .build();
-
-        lockedUser = User.builder()
-                .id(2L)
-                .firstName("Locked")
-                .lastName("User")
-                .email("locked@example.com")
-                .username("lockeduser")
-                .password("encodedPassword")
-                .status(UserStatus.ACTIVE)
-                .failedLoginAttempts(5)
-                .lockoutTime(LocalDateTime.now().plusMinutes(5))
-                .build();
     }
 
     @Nested
-    @DisplayName("Login endpoint lockout")
-    class LoginLockout {
+    @DisplayName("Login endpoint rate limiting")
+    class LoginRateLimiting {
 
         @Test
-        @DisplayName("should return 423 when account is locked")
-        void shouldReturnLockedWhenAccountLocked() throws Exception {
-            when(userRepository.findByUsername("lockeduser"))
-                    .thenReturn(Optional.of(lockedUser));
-            when(userRepository.findByEmail("lockeduser"))
+        @DisplayName("should return 401 when login is rate-limited")
+        void shouldReturnUnauthorizedWhenRateLimited() throws Exception {
+            when(userRepository.findByUsername("testuser"))
+                    .thenReturn(Optional.of(activeUser));
+            when(userRepository.findByEmail("testuser"))
                     .thenReturn(Optional.empty());
+            // Rate limiter says too many attempts
+            when(authService.checkLoginRateLimit(1L)).thenReturn(false);
+            when(authService.getLoginRateLimitRetrySeconds(1L)).thenReturn(300L);
 
-            LoginRequest request = new LoginRequest("lockeduser", "password");
+            LoginRequest request = new LoginRequest("testuser", "password");
 
             mockMvc.perform(post("/api/auth/login")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(request)))
-                    .andExpect(status().isLocked())
-                    .andExpect(jsonPath("$.success").value(false))
-                    .andExpect(jsonPath("$.message").value(
-                            org.hamcrest.Matchers.containsString("Account is temporarily locked")));
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.message").value("Invalid credentials"));
 
             // Verify no OTP was sent
             verify(authService, never()).sendLoginOtp(any());
         }
 
         @Test
-        @DisplayName("should increment failed attempts on wrong password")
-        void shouldIncrementFailedAttemptsOnWrongPassword() throws Exception {
+        @DisplayName("should record failed attempt on wrong password")
+        void shouldRecordFailedAttemptOnWrongPassword() throws Exception {
             when(userRepository.findByUsername("testuser"))
                     .thenReturn(Optional.of(activeUser));
             when(userRepository.findByEmail("testuser"))
                     .thenReturn(Optional.empty());
+            when(authService.checkLoginRateLimit(1L)).thenReturn(true);
             when(passwordEncoder.matches("wrongpassword", "encodedPassword"))
                     .thenReturn(false);
 
@@ -135,25 +132,21 @@ class AuthControllerLockoutTest {
             mockMvc.perform(post("/api/auth/login")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(request)))
-                    .andExpect(status().isUnauthorized());
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.message").value("Invalid credentials"));
 
-            // Verify failed attempts were incremented and saved
-            verify(userRepository).save(activeUser);
-            assertEquals(1, activeUser.getFailedLoginAttempts());
+            // Verify failed attempt was recorded in Redis rate limiter
+            verify(authService).recordFailedLoginAttempt(1L);
         }
 
         @Test
-        @DisplayName("should reset failed attempts on successful password")
-        void shouldResetFailedAttemptsOnSuccess() throws Exception {
-            // Pre-set some failed attempts
-            activeUser.incrementFailedLoginAttempts();
-            activeUser.incrementFailedLoginAttempts();
-            assertEquals(2, activeUser.getFailedLoginAttempts());
-
+        @DisplayName("should reset rate limiter on successful password")
+        void shouldResetRateLimiterOnSuccess() throws Exception {
             when(userRepository.findByUsername("testuser"))
                     .thenReturn(Optional.of(activeUser));
             when(userRepository.findByEmail("testuser"))
                     .thenReturn(Optional.empty());
+            when(authService.checkLoginRateLimit(1L)).thenReturn(true);
             when(passwordEncoder.matches("correctpassword", "encodedPassword"))
                     .thenReturn(true);
 
@@ -164,32 +157,33 @@ class AuthControllerLockoutTest {
                             .content(objectMapper.writeValueAsString(request)))
                     .andExpect(status().isOk());
 
-            // Verify failed attempts were reset
-            verify(userRepository).save(activeUser);
-            assertEquals(0, activeUser.getFailedLoginAttempts());
+            // Verify rate limiter was reset on success
+            verify(authService).resetLoginRateLimit(1L);
+            verify(authService).sendLoginOtp(activeUser);
         }
     }
 
     @Nested
-    @DisplayName("OTP verification lockout")
-    class OtpVerificationLockout {
+    @DisplayName("OTP verification rate limiting")
+    class OtpVerificationRateLimiting {
 
         @Test
-        @DisplayName("should return 423 when verifying OTP on locked account")
-        void shouldReturnLockedWhenVerifyingOtpOnLockedAccount() throws Exception {
-            when(userRepository.findByUsername("lockeduser"))
-                    .thenReturn(Optional.of(lockedUser));
-            when(userRepository.findByEmail("lockeduser"))
+        @DisplayName("should return 401 when OTP verification is rate-limited")
+        void shouldReturnUnauthorizedWhenOtpRateLimited() throws Exception {
+            when(userRepository.findByUsername("testuser"))
+                    .thenReturn(Optional.of(activeUser));
+            when(userRepository.findByEmail("testuser"))
                     .thenReturn(Optional.empty());
+            when(authService.checkOtpRateLimit(1L)).thenReturn(false);
+            when(authService.getOtpRateLimitRetrySeconds(1L)).thenReturn(300L);
 
-            OtpVerificationRequest request = new OtpVerificationRequest("lockeduser", "123456");
+            OtpVerificationRequest request = new OtpVerificationRequest("testuser", "123456");
 
             mockMvc.perform(post("/api/auth/verify-otp")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(request)))
-                    .andExpect(status().isLocked())
-                    .andExpect(jsonPath("$.message").value(
-                            org.hamcrest.Matchers.containsString("Account is temporarily locked")));
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.message").value("Invalid credentials"));
 
             // Verify OTP was not verified
             verify(authService, never()).verifyLoginOtp(anyString(), anyString());
@@ -197,25 +191,24 @@ class AuthControllerLockoutTest {
     }
 
     @Nested
-    @DisplayName("Resend OTP lockout")
-    class ResendOtpLockout {
+    @DisplayName("Resend OTP anti-enumeration")
+    class ResendOtpAntiEnumeration {
 
         @Test
-        @DisplayName("should return 423 when resending OTP on locked account")
-        void shouldReturnLockedWhenResendingOtpOnLockedAccount() throws Exception {
-            when(userRepository.findByUsername("lockeduser"))
-                    .thenReturn(Optional.of(lockedUser));
-            when(userRepository.findByEmail("lockeduser"))
+        @DisplayName("should return 401 for non-existent user")
+        void shouldReturnUnauthorizedForNonExistentUser() throws Exception {
+            when(userRepository.findByUsername("nonexistent"))
+                    .thenReturn(Optional.empty());
+            when(userRepository.findByEmail("nonexistent"))
                     .thenReturn(Optional.empty());
 
-            ResendOtpRequest request = new ResendOtpRequest("lockeduser");
+            ResendOtpRequest request = new ResendOtpRequest("nonexistent");
 
             mockMvc.perform(post("/api/auth/resend-otp")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(request)))
-                    .andExpect(status().isLocked())
-                    .andExpect(jsonPath("$.message").value(
-                            org.hamcrest.Matchers.containsString("Account is temporarily locked")));
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.message").value("Invalid credentials"));
 
             // Verify OTP was not resent
             verify(authService, never()).resendLoginOtp(anyString());

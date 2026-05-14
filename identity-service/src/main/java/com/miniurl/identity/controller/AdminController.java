@@ -9,6 +9,7 @@ import com.miniurl.identity.entity.User;
 import com.miniurl.identity.entity.UserStatus;
 import com.miniurl.identity.repository.RoleRepository;
 import com.miniurl.identity.repository.UserRepository;
+import com.miniurl.identity.service.OtpService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
@@ -38,10 +39,12 @@ public class AdminController {
 
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
+    private final OtpService otpService;
 
-    public AdminController(UserRepository userRepository, RoleRepository roleRepository) {
+    public AdminController(UserRepository userRepository, RoleRepository roleRepository, OtpService otpService) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
+        this.otpService = otpService;
     }
 
     @GetMapping("/users")
@@ -143,7 +146,9 @@ public class AdminController {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new com.miniurl.identity.exception.ResourceNotFoundException("User not found"));
         user.setStatus(UserStatus.DELETED);
+        user.incrementTokenVersion();  // Invalidate all existing tokens (Issue 3)
         userRepository.save(user);
+        otpService.storeTokenVersionByUsername(user.getUsername(), user.getTokenVersion());
         log.warn("ADMIN ACTION: User {} (id={}) deactivated", user.getUsername(), id);
         return ResponseEntity.ok(ApiResponse.success("User deactivated successfully"));
     }
@@ -185,7 +190,9 @@ public class AdminController {
         }
 
         user.setStatus(UserStatus.SUSPENDED);
+        user.incrementTokenVersion();  // Invalidate all existing tokens (Issue 3)
         userRepository.save(user);
+        otpService.storeTokenVersionByUsername(user.getUsername(), user.getTokenVersion());
         log.warn("ADMIN ACTION: User {} (id={}) suspended", user.getUsername(), id);
         return ResponseEntity.ok(ApiResponse.success("User suspended successfully"));
     }
