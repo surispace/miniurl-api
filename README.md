@@ -8,7 +8,7 @@ The system is split into several specialized services to ensure independent scal
 
 ### Service Map
 - **API Gateway**: The single entry point. Handles routing, RS256 JWT validation (via JWKS), and Redis-backed distributed rate limiting.
-- **Identity Service**: Manages users, authentication, and RSA key pairs for asymmetric JWT signing.
+- **Identity Service**: Manages users, authentication, and RSA key pairs for asymmetric JWT signing. OTP codes and email verification state are stored in Redis (not the database).
 - **URL Service**: Handles URL creation, management, and generates collision-free short codes using Snowflake IDs.
 - **Redirect Service**: A dedicated **Reactive (WebFlux)** service optimized for the "hot path" (`/r/{code}`). Uses a "Redis-first" resolution strategy.
 - **Feature Service**: Manages global and user-specific feature flags with Redis caching.
@@ -22,12 +22,13 @@ The system is split into several specialized services to ensure independent scal
 - **Reliability**: Implements the **Outbox Pattern** in Identity and URL services to ensure atomic database updates and guaranteed event delivery.
 - **High Throughput**: The Redirect Service uses non-blocking I/O (Spring WebFlux) and Redis to minimize latency.
 - **Database per Service**: Physical separation of MySQL databases to prevent coupling and allow independent scaling.
+- **Redis-First OTP**: Login OTP codes are stored in Redis with a 5-minute TTL instead of the database, reducing DB writes and leveraging Redis auto-expiry for cleanup.
 
 ---
 
 ## Tech Stack
 
-- **Backend**: Java 17, Spring Boot 3.2.0, Spring Cloud 2023.0.0
+- **Backend**: Java 21, Spring Boot 3.2.0, Spring Cloud 2023.0.0
 - **Reactive Stack**: Spring WebFlux (Redirect Service)
 - **Service Discovery**: Netflix Eureka
 - **API Gateway**: Spring Cloud Gateway
@@ -42,7 +43,7 @@ The system is split into several specialized services to ensure independent scal
 ## Getting Started
 
 ### Prerequisites
-- **JDK 17** or higher
+- **JDK 21** or higher
 - **Maven 3.8+**
 - **Docker & Docker Compose**
 - **kubectl** + **Helm 3.14+** (for Kubernetes deployment)
@@ -199,7 +200,9 @@ All requests should be sent to the **API Gateway** (default port `8080`).
 ### Public Endpoints
 - `GET /r/{code}` → Redirects to original URL (handled by Redirect Service)
 - `POST /api/auth/signup` → User registration
-- `POST /api/auth/login` → Authentication
+- `POST /api/auth/login` → Authentication (password + OTP via Redis)
+- `POST /api/auth/verify-otp` → Verify OTP and receive JWT
+- `POST /api/auth/resend-otp` → Resend OTP (30s cooldown)
 - `GET /api/features/global` → Get global feature flags
 
 ### Authenticated Endpoints
@@ -222,7 +225,7 @@ All requests should be sent to the **API Gateway** (default port `8080`).
 ├── common/                     # Shared DTOs, Exceptions, and Utils
 ├── api-gateway/                # Spring Cloud Gateway (Routing, Security, Rate Limiting)
 ├── eureka-server/              # Service Discovery
-├── identity-service/           # Auth, User Management, JWKS
+├── identity-service/           # Auth, User Management, JWKS, Redis-backed OTP
 ├── url-service/                # URL Management, Snowflake ID Generation
 ├── redirect-service/           # Reactive Redirect Path (High Throughput)
 ├── feature-service/            # Feature Flag Management

@@ -16,8 +16,6 @@ import com.miniurl.identity.repository.UserRepository;
 import com.miniurl.identity.repository.VerificationTokenRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -42,12 +40,7 @@ public class AuthService {
     private final TokenService tokenService;
     private final PasswordEncoder passwordEncoder;
     private final EmailInviteService emailInviteService;
-
-    @Value("${app.otp.expiry-minutes:10}")
-    private int otpExpiryMinutes;
-
-    @Value("${app.otp.resend-cooldown-seconds:30}")
-    private int otpResendCooldownSeconds;
+    private final OtpService otpService;
 
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -61,7 +54,8 @@ public class AuthService {
                       OutboxService outboxService,
                       TokenService tokenService,
                       PasswordEncoder passwordEncoder,
-                      EmailInviteService emailInviteService) {
+                      EmailInviteService emailInviteService,
+                      OtpService otpService) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.tokenRepository = tokenRepository;
@@ -69,6 +63,7 @@ public class AuthService {
         this.tokenService = tokenService;
         this.passwordEncoder = passwordEncoder;
         this.emailInviteService = emailInviteService;
+        this.otpService = otpService;
     }
 
     /**
@@ -142,8 +137,8 @@ public class AuthService {
                 throw new UnauthorizedException("Account suspended!");
             }
 
-            // Block active verified users
-            if (existingUser.get().isOtpVerified() && status == UserStatus.ACTIVE) {
+            // Block active users (all active users have verified emails via invite)
+            if (status == UserStatus.ACTIVE) {
                 throw new UnauthorizedException("Email already registered");
             }
         }
@@ -182,7 +177,6 @@ public class AuthService {
             user.setUsername(username);
             user.setPassword(passwordEncoder.encode(password));
             user.setStatus(UserStatus.ACTIVE);
-            user.setOtpVerified(true); // Email already verified via invite
             user.setMustChangePassword(false); // User set their own password
 
             // Invalidate ALL existing tokens for this user (used and unused)
@@ -197,13 +191,15 @@ public class AuthService {
                 .username(username)
                 .password(passwordEncoder.encode(password))
                 .role(userRole)
-                .otpVerified(true) // Email already verified via admin invite
                 .mustChangePassword(false) // User set their own password
                 .status(UserStatus.ACTIVE)
                 .build();
         }
 
         userRepository.save(user);
+
+        // Mark email as verified in Redis (all users come via invite)
+        otpService.markEmailVerified(user.getId());
 
         // Track signup for rate limiting
         signupRequests.put(email.toLowerCase(), LocalDateTime.now());
@@ -518,35 +514,27 @@ public class AuthService {
 
     /**
      * Send OTP for 2FA login. Reuses existing valid OTP if available, generates new one otherwise.
-     * Enforces 30-second cooldown between OTP sends.
+     * Enforces cooldown between OTP sends via Redis.
      * @param user The authenticated user
-     * @throws RateLimitCooldownException if called within 30 seconds of last OTP send
+     * @throws RateLimitCooldownException if called within cooldown period of last OTP send
      */
-    @Transactional
     public void sendLoginOtp(User user) {
-        // Check cooldown (30 seconds)
-        if (user.getLastOtpSentAt() != null) {
-            LocalDateTime cooldownEnd = user.getLastOtpSentAt().plusSeconds(otpResendCooldownSeconds);
-            if (LocalDateTime.now().isBefore(cooldownEnd)) {
-                throw new RateLimitCooldownException("Please wait 30 seconds before requesting a new OTP.");
-            }
+        // Check cooldown via Redis
+        if (!otpService.trySetCooldown(user.getId())) {
+            long remaining = otpService.getCooldownRemainingSeconds(user.getId());
+            throw new RateLimitCooldownException(
+                String.format("Please wait %d seconds before requesting a new OTP.", remaining));
         }
 
-        boolean hasValidOtp = user.getOtpCode() != null
-                && user.getOtpExpiry() != null
-                && LocalDateTime.now().isBefore(user.getOtpExpiry())
-                && !user.isOtpVerified();
-
-        if (hasValidOtp) {
-            // Resend same OTP
-            user.setLastOtpSentAt(LocalDateTime.now());
-            userRepository.save(user);
+        if (otpService.hasValidOtp(user.getId())) {
+            // Resend same OTP — OTP is still in Redis
+            String existingOtp = otpService.getOtp(user.getId());
             try {
                 NotificationEvent event = NotificationEvent.builder()
                     .eventType("OTP")
                     .toEmail(user.getEmail())
                     .payload(java.util.Map.of(
-                        "otp", user.getOtpCode(),
+                        "otp", existingOtp,
                         "firstName", user.getFirstName()
                     ))
                     .build();
@@ -563,17 +551,12 @@ public class AuthService {
 
     /**
      * Generate and send OTP for 2FA login.
-     * Generates a 6-digit OTP, stores it on the user, and sends it via email.
+     * Generates a 6-digit OTP, stores it in Redis, and sends it via email.
      * @param user The authenticated user
      */
-    @Transactional
     public void generateAndSendLoginOtp(User user) {
         String otp = generateOtp();
-        user.setOtpCode(otp);
-        user.setOtpExpiry(LocalDateTime.now().plusMinutes(otpExpiryMinutes));
-        user.setOtpVerified(false);
-        user.setLastOtpSentAt(LocalDateTime.now());
-        userRepository.save(user);
+        otpService.storeOtp(user.getId(), otp);
 
         try {
             NotificationEvent event = NotificationEvent.builder()
@@ -596,39 +579,34 @@ public class AuthService {
      * Resend OTP for 2FA login.
      * Accepts either username or email — whichever was used during login.
      * Reuses existing OTP if still valid, generates new one if expired.
-     * Enforces 30-second cooldown between consecutive resend requests only.
+     * Enforces cooldown between consecutive resend requests via Redis.
      */
-    @Transactional
     public void resendLoginOtp(String usernameOrEmail) {
         User user = userRepository.findByUsername(usernameOrEmail)
             .or(() -> userRepository.findByEmail(usernameOrEmail))
             .orElseThrow(() -> new ResourceNotFoundException("User not found: " + usernameOrEmail));
 
-        if (user.getOtpCode() == null || user.getOtpExpiry() == null) {
+        if (!otpService.hasValidOtp(user.getId())) {
             throw new UnauthorizedException("No OTP generated. Please login again.");
         }
 
-        // Check resend cooldown (30 seconds between consecutive resend requests)
-        // Only applies if user has already requested a resend (not the initial login)
-        if (user.getLastOtpSentAt() != null) {
-            LocalDateTime cooldownEnd = user.getLastOtpSentAt().plusSeconds(otpResendCooldownSeconds);
-            if (LocalDateTime.now().isBefore(cooldownEnd)) {
-                throw new RateLimitCooldownException("Please wait before requesting a new OTP.");
-            }
+        // Check resend cooldown via Redis
+        if (!otpService.trySetCooldown(user.getId())) {
+            long remaining = otpService.getCooldownRemainingSeconds(user.getId());
+            throw new RateLimitCooldownException(
+                String.format("Please wait %d seconds before requesting a new OTP.", remaining));
         }
 
         // Reuse existing OTP if still valid, otherwise generate new one
-        if (LocalDateTime.now().isBefore(user.getOtpExpiry()) && !user.isOtpVerified()) {
+        if (otpService.hasValidOtp(user.getId())) {
             // Resend same OTP
-            user.setLastOtpSentAt(LocalDateTime.now());
-            userRepository.save(user);
-
+            String existingOtp = otpService.getOtp(user.getId());
             try {
                 NotificationEvent event = NotificationEvent.builder()
                     .eventType("OTP")
                     .toEmail(user.getEmail())
                     .payload(java.util.Map.of(
-                        "otp", user.getOtpCode(),
+                        "otp", existingOtp,
                         "firstName", user.getFirstName()
                     ))
                     .build();
@@ -648,28 +626,21 @@ public class AuthService {
      * Accepts either username or email — whichever was used during login.
      * Returns the user if OTP is valid, throws exception otherwise.
      */
-    @Transactional
     public User verifyLoginOtp(String usernameOrEmail, String otp) {
         User user = userRepository.findByUsername(usernameOrEmail)
             .or(() -> userRepository.findByEmail(usernameOrEmail))
             .orElseThrow(() -> new ResourceNotFoundException("User not found: " + usernameOrEmail));
 
-        if (user.getOtpCode() == null || user.getOtpExpiry() == null) {
-            throw new UnauthorizedException("No OTP generated. Please login again.");
-        }
-
-        if (LocalDateTime.now().isAfter(user.getOtpExpiry())) {
+        String storedOtp = otpService.getOtp(user.getId());
+        if (storedOtp == null) {
             throw new UnauthorizedException("OTP has expired. Please login again.");
         }
 
-        if (!user.getOtpCode().equals(otp)) {
+        if (!storedOtp.equals(otp)) {
             throw new UnauthorizedException("Invalid OTP. Please try again.");
         }
 
-        user.setOtpVerified(true);
-        user.setOtpCode(null);
-        user.setOtpExpiry(null);
-        userRepository.save(user);
+        otpService.deleteOtp(user.getId());
 
         logger.info("Login OTP verified successfully for: {}", user.getUsername());
         return user;

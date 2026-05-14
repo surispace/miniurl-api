@@ -44,16 +44,6 @@ public class User {
     @JoinColumn(name = "role_id", nullable = false)
     private Role role;
 
-    @Size(max = 6, message = "OTP code must be 6 characters or less")
-    @Column(name = "otp_code", length = 6)
-    private String otpCode;
-
-    @Column(name = "otp_expiry")
-    private LocalDateTime otpExpiry;
-
-    @Column(name = "otp_verified")
-    private boolean otpVerified = false;
-
     @Column(name = "must_change_password")
     private boolean mustChangePassword = false;
 
@@ -78,9 +68,6 @@ public class User {
 
     @Column(name = "lockout_time")
     private LocalDateTime lockoutTime;
-
-    @Column(name = "last_otp_sent_at")
-    private LocalDateTime lastOtpSentAt;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "theme", nullable = false, length = 20)
@@ -135,15 +122,6 @@ public class User {
     public Role getRole() { return role; }
     public void setRole(Role role) { this.role = role; }
 
-    public String getOtpCode() { return otpCode; }
-    public void setOtpCode(String otpCode) { this.otpCode = otpCode; }
-
-    public LocalDateTime getOtpExpiry() { return otpExpiry; }
-    public void setOtpExpiry(LocalDateTime otpExpiry) { this.otpExpiry = otpExpiry; }
-
-    public boolean isOtpVerified() { return otpVerified; }
-    public void setOtpVerified(boolean otpVerified) { this.otpVerified = otpVerified; }
-
     public boolean isMustChangePassword() { return mustChangePassword; }
     public void setMustChangePassword(boolean mustChangePassword) { this.mustChangePassword = mustChangePassword; }
 
@@ -175,9 +153,6 @@ public class User {
 
     public LocalDateTime getLockoutTime() { return lockoutTime; }
     public void setLockoutTime(LocalDateTime lockoutTime) { this.lockoutTime = lockoutTime; }
-
-    public LocalDateTime getLastOtpSentAt() { return lastOtpSentAt; }
-    public void setLastOtpSentAt(LocalDateTime lastOtpSentAt) { this.lastOtpSentAt = lastOtpSentAt; }
 
     public Theme getTheme() { return theme; }
     public void setTheme(Theme theme) { this.theme = theme; }
@@ -242,16 +217,12 @@ public class User {
         private String username;
         private String password;
         private Role role;
-        private String otpCode;
-        private LocalDateTime otpExpiry;
-        private boolean otpVerified = false;
         private boolean mustChangePassword = false;
         private LocalDateTime lastLogin;
         private UserStatus status = UserStatus.ACTIVE;
         private int tokenVersion = 0;
         private int failedLoginAttempts = 0;
         private LocalDateTime lockoutTime;
-        private LocalDateTime lastOtpSentAt;
         private Theme theme = Theme.LIGHT;
 
         public Builder id(Long id) { this.id = id; return this; }
@@ -261,31 +232,23 @@ public class User {
         public Builder username(String username) { this.username = username; return this; }
         public Builder password(String password) { this.password = password; return this; }
         public Builder role(Role role) { this.role = role; return this; }
-        public Builder otpCode(String otpCode) { this.otpCode = otpCode; return this; }
-        public Builder otpExpiry(LocalDateTime otpExpiry) { this.otpExpiry = otpExpiry; return this; }
-        public Builder otpVerified(boolean otpVerified) { this.otpVerified = otpVerified; return this; }
         public Builder mustChangePassword(boolean mustChangePassword) { this.mustChangePassword = mustChangePassword; return this; }
         public Builder lastLogin(LocalDateTime lastLogin) { this.lastLogin = lastLogin; return this; }
         public Builder status(UserStatus status) { this.status = status; return this; }
         public Builder tokenVersion(int tokenVersion) { this.tokenVersion = tokenVersion; return this; }
         public Builder failedLoginAttempts(int failedLoginAttempts) { this.failedLoginAttempts = failedLoginAttempts; return this; }
         public Builder lockoutTime(LocalDateTime lockoutTime) { this.lockoutTime = lockoutTime; return this; }
-        public Builder lastOtpSentAt(LocalDateTime lastOtpSentAt) { this.lastOtpSentAt = lastOtpSentAt; return this; }
         public Builder theme(Theme theme) { this.theme = theme; return this; }
         public User build() {
             User user = new User(firstName, lastName, email, username, password);
             user.id = id;
             user.role = role;
-            user.otpCode = otpCode;
-            user.otpExpiry = otpExpiry;
-            user.otpVerified = otpVerified;
             user.mustChangePassword = mustChangePassword;
             user.lastLogin = lastLogin;
             user.status = status;
             user.tokenVersion = tokenVersion;
             user.failedLoginAttempts = failedLoginAttempts;
             user.lockoutTime = lockoutTime;
-            user.lastOtpSentAt = lastOtpSentAt;
             user.theme = theme;
             return user;
         }

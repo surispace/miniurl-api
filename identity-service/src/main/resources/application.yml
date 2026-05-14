@@ -36,11 +36,18 @@ spring:
       properties:
         spring.json.trusted.packages: "com.miniurl.dto"
 
+  # Redis Configuration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
 app:
   # Base URL for email links and redirects
   base-url: ${APP_BASE_URL:http://localhost:3000}
   otp:
-    expiry-minutes: 10
+    expiry-minutes: 5
+    resend-cooldown-seconds: 30
   name: ${APP_NAME:MyURL}
 
 # JWT RSA Key Configuration

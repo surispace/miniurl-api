@@ -37,15 +37,11 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(255) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
     role_id BIGINT DEFAULT 2,
-    otp_code VARCHAR(6),
-    otp_expiry DATETIME,
-    otp_verified BOOLEAN DEFAULT FALSE,
     must_change_password BOOLEAN DEFAULT FALSE,
     last_login DATETIME,
     status ENUM('ACTIVE','DELETED','SUSPENDED') NOT NULL DEFAULT 'ACTIVE',
     failed_login_attempts INT DEFAULT 0,
     lockout_time DATETIME,
-    last_otp_sent_at DATETIME,
     theme ENUM('LIGHT', 'DARK', 'OCEAN', 'FOREST') DEFAULT 'LIGHT',
     token_version INT DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -241,10 +237,10 @@ WHERE f.feature_key IN ('GLOBAL_USER_SIGNUP', 'GLOBAL_APP_NAME', 'TWO_FACTOR_AUT
 -- IMPORTANT: This will NOT overwrite existing admin user data
 -- TODO: Replace the email, username, and password hash below with your own values
 -- use https://bcrypt-generator.com/ to create a bcrypt hash of your desired password with rounds=10
-INSERT INTO users (email, first_name, last_name, username, password, role_id, otp_verified, must_change_password, status, failed_login_attempts, token_version)
+INSERT INTO users (email, first_name, last_name, username, password, role_id, must_change_password, status, failed_login_attempts, token_version)
 SELECT '<YOUR_ADMIN_EMAIL>', '<Admin_FirstName>', '<Admin_LastName>', '<YOUR_ADMIN_USERNAME>',
        '<YOUR_BCRYPT_PASSWORD_HASH>',
-       1, true, true, 'ACTIVE', 0, 0
+       1, true, 'ACTIVE', 0, 0
 FROM DUAL
 WHERE NOT EXISTS (
     SELECT 1 FROM users WHERE username = '<YOUR_ADMIN_USERNAME>'

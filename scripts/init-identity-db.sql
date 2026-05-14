@@ -28,15 +28,11 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(255) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
     role_id BIGINT DEFAULT 2,
-    otp_code VARCHAR(6),
-    otp_expiry DATETIME,
-    otp_verified BOOLEAN DEFAULT FALSE,
     must_change_password BOOLEAN DEFAULT FALSE,
     last_login DATETIME,
     status ENUM('ACTIVE','DELETED','SUSPENDED') NOT NULL DEFAULT 'ACTIVE',
     failed_login_attempts INT DEFAULT 0,
     lockout_time DATETIME,
-    last_otp_sent_at DATETIME,
     theme ENUM('LIGHT', 'DARK', 'OCEAN', 'FOREST') DEFAULT 'LIGHT',
     token_version INT DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -98,10 +94,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Default Admin User
-INSERT INTO users (email, first_name, last_name, username, password, role_id, otp_verified, must_change_password, status, failed_login_attempts, token_version)
+INSERT INTO users (email, first_name, last_name, username, password, role_id, must_change_password, status, failed_login_attempts, token_version)
 SELECT 'admin@miniurl.com', 'Admin', 'User', 'admin',
        '$2a$10$8.UnS6S.S6S.S6S.S6S.S6S.S6S.S6S.S6S.S6S.S6S.S6S.S6S', -- Placeholder hash
-       1, true, true, 'ACTIVE', 0, 0
+       1, true, 'ACTIVE', 0, 0
 FROM DUAL
 WHERE NOT EXISTS (
     SELECT 1 FROM users WHERE username = 'admin'
