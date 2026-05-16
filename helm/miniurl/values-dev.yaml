@@ -7,7 +7,7 @@ globalConfig:
   APP_BASE_URL: "http://dev.api.miniurl.com"
   APP_UI_BASE_URL: "http://dev.miniurl.com"
   # Docker Hub single-repository for per-service image tags
-  IMAGE_REPOSITORY: "docker.io/gallantsuri1/miniurl-api"
+  IMAGE_REPOSITORY: "docker.io/surispace/miniurl-api"
 
 services:
   api-gateway:

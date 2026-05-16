@@ -33,13 +33,13 @@ globalConfig:
   MYSQL_ANALYTICS_PORT: "3306"
   MYSQL_ANALYTICS_DB: "analytics_db"
   # Docker Hub single-repository for per-service image tags
-  IMAGE_REPOSITORY: "docker.io/gallantsuri1/miniurl-api"
+  IMAGE_REPOSITORY: "docker.io/surispace/miniurl-api"
 
 services:
   api-gateway:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/api-gateway
+      repository: ghcr.io/surispace/miniurl-api/api-gateway
       tag: ""
       pullPolicy: Always
     ports:
@@ -79,7 +79,7 @@ services:
   eureka-server:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/eureka-server
+      repository: ghcr.io/surispace/miniurl-api/eureka-server
       tag: ""
       pullPolicy: Always
     ports:
@@ -119,7 +119,7 @@ services:
   identity-service:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/identity-service
+      repository: ghcr.io/surispace/miniurl-api/identity-service
       tag: ""
       pullPolicy: Always
     ports:
@@ -174,7 +174,7 @@ services:
   url-service:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/url-service
+      repository: ghcr.io/surispace/miniurl-api/url-service
       tag: ""
       pullPolicy: Always
     ports:
@@ -224,7 +224,7 @@ services:
   redirect-service:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/redirect-service
+      repository: ghcr.io/surispace/miniurl-api/redirect-service
       tag: ""
       pullPolicy: Always
     ports:
@@ -264,7 +264,7 @@ services:
   feature-service:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/feature-service
+      repository: ghcr.io/surispace/miniurl-api/feature-service
       tag: ""
       pullPolicy: Always
     ports:
@@ -314,7 +314,7 @@ services:
   notification-service:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/notification-service
+      repository: ghcr.io/surispace/miniurl-api/notification-service
       tag: ""
       pullPolicy: Always
     ports:
@@ -375,7 +375,7 @@ services:
   analytics-service:
     replicas: 1
     image:
-      repository: ghcr.io/gallantsuri1/miniurl-api/analytics-service
+      repository: ghcr.io/surispace/miniurl-api/analytics-service
       tag: ""
       pullPolicy: Always
     ports:

@@ -20,9 +20,9 @@
     <description>Parent POM for MyURL Microservices Architecture</description>
 
     <scm>
-        <connection>scm:git:git@github.com:gallantsuri1/miniurl-api.git</connection>
-        <developerConnection>scm:git:git@github.com:gallantsuri1/miniurl-api.git</developerConnection>
-        <url>https://github.com/gallantsuri1/miniurl-api</url>
+        <connection>scm:git:git@github.com:surispace/miniurl-api.git</connection>
+        <developerConnection>scm:git:git@github.com:surispace/miniurl-api.git</developerConnection>
+        <url>https://github.com/surispace/miniurl-api</url>
         <tag>HEAD</tag>
     </scm>
 

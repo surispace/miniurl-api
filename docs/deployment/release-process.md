@@ -29,7 +29,7 @@ When a PR merges to `main`:
 
 1. [`deploy-dev.yml`](../../.github/workflows/deploy-dev.yml) triggers automatically
 2. Builds all 8 service images tagged `sha-{short_hash}`
-3. Pushes to `ghcr.io/gallantsuri1/miniurl-api/{service}:sha-{hash}`
+3. Pushes to `ghcr.io/surispace/miniurl-api/{service}:sha-{hash}`
 4. Deploys to dev cluster via Helm with `--set globalConfig.IMAGE_TAG=sha-{hash}`
 5. Runs smoke test against `/api/health`
 6. Notifies Slack on success/failure
@@ -77,7 +77,7 @@ Triggered by pushing a `v*` tag (e.g., `v1.2.0`):
 
 1. [`release.yml`](../../.github/workflows/release.yml) builds multi-arch images (amd64 + arm64)
 2. Tags images with semver: `ghcr.io/.../api-gateway:1.2.0`
-3. Also pushes to Docker Hub: `gallantsuri1/miniurl-api:api-gateway-1.2.0`
+3. Also pushes to Docker Hub: `surispace/miniurl-api:api-gateway-1.2.0`
 4. Creates a GitHub Issue summarizing published images
 
 ## Canary Architecture
