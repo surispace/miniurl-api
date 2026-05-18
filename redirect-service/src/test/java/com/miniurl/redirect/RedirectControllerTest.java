@@ -1,5 +1,6 @@
 package com.miniurl.redirect;
 
+import com.miniurl.redirect.config.SecurityConfig;
 import com.miniurl.redirect.controller.RedirectController;
 import com.miniurl.redirect.service.RedirectService;
 import org.junit.jupiter.api.DisplayName;
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.WebFluxTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 
@@ -18,6 +20,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @WebFluxTest(RedirectController.class)
+@Import(SecurityConfig.class)
 @DisplayName("RedirectController Security Tests")
 class RedirectControllerTest {
 
