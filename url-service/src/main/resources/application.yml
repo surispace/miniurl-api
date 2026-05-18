@@ -5,6 +5,11 @@ server:
 spring:
   application:
     name: url-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWK_SET_URI:http://identity-service:8085/.well-known/jwks.json}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:

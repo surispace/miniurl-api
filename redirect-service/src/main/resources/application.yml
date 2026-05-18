@@ -4,6 +4,11 @@ server:
 spring:
   application:
     name: redirect-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWK_SET_URI:http://identity-service:8085/.well-known/jwks.json}
   data:
     redis:
       host: ${REDIRECT_REDIS_HOST:localhost}

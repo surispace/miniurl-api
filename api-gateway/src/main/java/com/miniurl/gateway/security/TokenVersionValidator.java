@@ -6,7 +6,6 @@ import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.security.oauth2.core.OAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2TokenValidatorResult;
 import org.springframework.security.oauth2.jwt.Jwt;
-import reactor.core.publisher.Mono;
 
 /**
  * Custom JWT validator that checks the tokenVersion claim against Redis.
@@ -16,6 +15,8 @@ import reactor.core.publisher.Mono;
  * When a user's password is changed or account is deactivated, the identity-service
  * increments the tokenVersion and stores it in Redis under "user:tokenVersion:{userId}".
  * This validator rejects any JWT whose tokenVersion claim is less than the stored value.
+ *
+ * Redis key resolution: Prefers "userId" claim (enriched JWT), falls back to "sub" (legacy JWT).
  */
 public class TokenVersionValidator implements OAuth2TokenValidator<Jwt> {
 
@@ -30,26 +31,19 @@ public class TokenVersionValidator implements OAuth2TokenValidator<Jwt> {
 
     @Override
     public OAuth2TokenValidatorResult validate(Jwt jwt) {
-        // Extract tokenVersion from JWT claims
         Integer tokenVersion = jwt.getClaim("tokenVersion");
-        String subject = jwt.getSubject();
+        String userIdentifier = resolveUserIdentifier(jwt);
 
         if (tokenVersion == null) {
-            // Token was issued before tokenVersion was added — allow it
-            // (backward compatibility during rollout)
-            log.debug("JWT for '{}' has no tokenVersion claim — allowing", subject);
+            log.debug("JWT for '{}' has no tokenVersion claim — allowing", userIdentifier);
             return OAuth2TokenValidatorResult.success();
         }
 
-        // Check against Redis — this is a blocking call in a reactive context,
-        // but Spring Security's reactive JWT decoder handles this correctly
-        // by subscribing to the Mono internally.
-        String redisKey = TOKEN_VERSION_KEY_PREFIX + subject;
+        String redisKey = TOKEN_VERSION_KEY_PREFIX + userIdentifier;
         String storedVersionStr = redisTemplate.opsForValue().get(redisKey).block();
 
         if (storedVersionStr == null) {
-            // No stored version — token is valid (first login or Redis not yet populated)
-            log.debug("No stored tokenVersion for '{}' — allowing", subject);
+            log.debug("No stored tokenVersion for '{}' — allowing", userIdentifier);
             return OAuth2TokenValidatorResult.success();
         }
 
@@ -57,13 +51,13 @@ public class TokenVersionValidator implements OAuth2TokenValidator<Jwt> {
         try {
             storedVersion = Integer.parseInt(storedVersionStr);
         } catch (NumberFormatException e) {
-            log.warn("Invalid tokenVersion in Redis for '{}': {}", subject, storedVersionStr);
+            log.warn("Invalid tokenVersion in Redis for '{}': {}", userIdentifier, storedVersionStr);
             return OAuth2TokenValidatorResult.success();
         }
 
         if (tokenVersion < storedVersion) {
             log.warn("JWT rejected for '{}': tokenVersion {} < stored {}",
-                    subject, tokenVersion, storedVersion);
+                    userIdentifier, tokenVersion, storedVersion);
             return OAuth2TokenValidatorResult.failure(
                     new org.springframework.security.oauth2.core.OAuth2Error(
                             "invalid_token",
@@ -74,5 +68,17 @@ public class TokenVersionValidator implements OAuth2TokenValidator<Jwt> {
         }
 
         return OAuth2TokenValidatorResult.success();
+    }
+
+    /**
+     * Resolves the user identifier for the Redis key.
+     * Prefers "userId" claim (enriched JWT), falls back to "sub" (legacy JWT).
+     */
+    private String resolveUserIdentifier(Jwt jwt) {
+        Object userIdClaim = jwt.getClaims().get("userId");
+        if (userIdClaim != null) {
+            return String.valueOf(userIdClaim);
+        }
+        return jwt.getSubject();
     }
 }

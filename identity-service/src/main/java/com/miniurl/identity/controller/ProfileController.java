@@ -60,9 +60,9 @@ public class ProfileController {
         }
 
         String token = authHeader.substring(7);
-        String username = jwtService.extractUsername(token);
+        Long userId = jwtService.extractUserId(token);
 
-        User user = userRepository.findByUsername(username)
+        User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         Map<String, Object> response = new HashMap<>();
@@ -96,9 +96,9 @@ public class ProfileController {
         }
 
         String token = authHeader.substring(7);
-        String username = jwtService.extractUsername(token);
+        Long userId = jwtService.extractUserId(token);
 
-        User user = userRepository.findByUsername(username)
+        User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         User updatedUser = authService.updateProfile(

@@ -77,8 +77,8 @@ class FeatureFlagPublicControllerTest {
         @Test
         @DisplayName("Should return features for authenticated user's role")
         void shouldReturnFeaturesForAuthenticatedUser() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
 
             mockMvc.perform(get("/api/features")
                             .header("Authorization", VALID_AUTH_HEADER))
@@ -98,8 +98,8 @@ class FeatureFlagPublicControllerTest {
         @Test
         @DisplayName("Should return 404 when user not found")
         void shouldReturn404WhenUserNotFound() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("nonexistent");
-            when(userRepository.findByUsername("nonexistent")).thenReturn(Optional.empty());
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(999L);
+            when(userRepository.findById(999L)).thenReturn(Optional.empty());
 
             mockMvc.perform(get("/api/features")
                             .header("Authorization", VALID_AUTH_HEADER))

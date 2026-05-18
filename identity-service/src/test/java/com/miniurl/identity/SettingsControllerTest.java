@@ -82,8 +82,8 @@ class SettingsControllerTest {
         @Test
         @DisplayName("Should return export data with valid JWT")
         void shouldReturnExportDataWithValidJwt() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
 
             mockMvc.perform(get("/api/settings/export")
                             .header("Authorization", VALID_AUTH_HEADER))
@@ -109,8 +109,8 @@ class SettingsControllerTest {
         @Test
         @DisplayName("Should return 404 when user not found")
         void shouldReturn404WhenUserNotFound() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("nonexistent");
-            when(userRepository.findByUsername("nonexistent")).thenReturn(Optional.empty());
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(999L);
+            when(userRepository.findById(999L)).thenReturn(Optional.empty());
 
             mockMvc.perform(get("/api/settings/export")
                             .header("Authorization", VALID_AUTH_HEADER))
@@ -127,8 +127,8 @@ class SettingsControllerTest {
         void shouldDeleteAccountWithValidJwtAndPassword() throws Exception {
             DeleteAccountRequest request = new DeleteAccountRequest(42L, "TestPass123!@#");
 
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
             doNothing().when(authService).deleteAccount(eq(42L), eq("TestPass123!@#"));
 
             mockMvc.perform(post("/api/settings/delete-account")
@@ -155,8 +155,8 @@ class SettingsControllerTest {
         void shouldReturn400WhenPasswordBlank() throws Exception {
             DeleteAccountRequest request = new DeleteAccountRequest(42L, "");
 
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
 
             mockMvc.perform(post("/api/settings/delete-account")
                             .header("Authorization", VALID_AUTH_HEADER)

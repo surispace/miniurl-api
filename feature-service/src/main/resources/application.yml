@@ -4,6 +4,11 @@ server:
 spring:
   application:
     name: feature-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWK_SET_URI:http://identity-service:8085/.well-known/jwks.json}
   datasource:
     url: jdbc:mysql://${FEATURE_DB_HOST:mysql-feature}:${FEATURE_DB_PORT:3306}/feature_db
     username: ${FEATURE_DB_USER:root}

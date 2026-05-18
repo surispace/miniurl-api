@@ -90,11 +90,11 @@ class AuthControllerDeleteAccountTest {
     class JwtBasedIdentity {
 
         @Test
-        @DisplayName("should use JWT username, not request body userId")
+        @DisplayName("should use JWT userId, not request body userId")
         void shouldUseJwtUsernameNotRequestBodyUserId() throws Exception {
-            // Attacker sends userId=999 in body, but JWT says testuser (id=42)
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            // Attacker sends userId=999 in body, but JWT says userId=42
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
             doNothing().when(authService).deleteAccount(eq(42L), anyString());
 
             DeleteAccountRequest request = new DeleteAccountRequest(999L, "correctPassword");
@@ -135,10 +135,10 @@ class AuthControllerDeleteAccountTest {
         }
 
         @Test
-        @DisplayName("should return 404 when JWT username does not match any user")
+        @DisplayName("should return 404 when JWT userId does not match any user")
         void shouldReturnNotFoundWhenJwtUserNotFound() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("nonexistent");
-            when(userRepository.findByUsername("nonexistent")).thenReturn(Optional.empty());
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(999L);
+            when(userRepository.findById(999L)).thenReturn(Optional.empty());
 
             DeleteAccountRequest request = new DeleteAccountRequest(42L, "password");
 
@@ -157,8 +157,8 @@ class AuthControllerDeleteAccountTest {
         @Test
         @DisplayName("should successfully delete account with correct password")
         void shouldDeleteAccountWithCorrectPassword() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
             doNothing().when(authService).deleteAccount(42L, "correctPassword");
 
             DeleteAccountRequest request = new DeleteAccountRequest(42L, "correctPassword");
@@ -175,8 +175,8 @@ class AuthControllerDeleteAccountTest {
         @Test
         @DisplayName("should return 400 when password is wrong")
         void shouldReturnBadRequestWhenPasswordWrong() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
             doThrow(new com.miniurl.identity.exception.UnauthorizedException("Password is incorrect"))
                     .when(authService).deleteAccount(42L, "wrongPassword");
 

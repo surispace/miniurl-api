@@ -62,9 +62,9 @@ public class SettingsController {
         }
 
         String token = authHeader.substring(7);
-        String username = jwtService.extractUsername(token);
+        Long userId = jwtService.extractUserId(token);
 
-        User user = userRepository.findByUsername(username)
+        User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         // Fetch URLs from url-service via internal endpoint
@@ -83,11 +83,11 @@ public class SettingsController {
         exportData.put("user", userData);
         exportData.put("urls", urls);
 
-        log.info("DATA_EXPORT: User {} (id={}) exported data", username, user.getId());
+        log.info("DATA_EXPORT: User {} (id={}) exported data", user.getUsername(), user.getId());
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setContentDispositionFormData("attachment", "miniurl-export-" + username + ".json");
+        headers.setContentDispositionFormData("attachment", "miniurl-export-" + user.getUsername() + ".json");
 
         return new ResponseEntity<>(exportData, headers, HttpStatus.OK);
     }
@@ -109,14 +109,14 @@ public class SettingsController {
         }
 
         String token = authHeader.substring(7);
-        String username = jwtService.extractUsername(token);
+        Long userId = jwtService.extractUserId(token);
 
-        User user = userRepository.findByUsername(username)
+        User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         authService.deleteAccount(user.getId(), request.getPassword());
 
-        log.warn("ACCOUNT_DELETION: User {} (id={}) deleted account via settings", username, user.getId());
+        log.warn("ACCOUNT_DELETION: User {} (id={}) deleted account via settings", user.getUsername(), user.getId());
 
         return ResponseEntity.ok(ApiResponse.success("Account deleted successfully"));
     }

@@ -17,6 +17,20 @@ public class UserPrincipal implements UserDetails {
         this.user = user;
     }
 
+    /**
+     * Returns the underlying User entity for extracting claims (userId, roles, etc.).
+     */
+    public User getUser() {
+        return user;
+    }
+
+    /**
+     * Convenience method to get the user's database ID for JWT claims.
+     */
+    public Long getUserId() {
+        return user.getId();
+    }
+
     @Override
     public String getUsername() {
         return user.getUsername();

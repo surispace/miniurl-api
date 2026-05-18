@@ -82,8 +82,8 @@ class ProfileControllerTest {
         @Test
         @DisplayName("Should return profile when valid JWT is provided")
         void shouldReturnProfileWithValidJwt() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
 
             mockMvc.perform(get("/api/profile")
                             .header("Authorization", VALID_AUTH_HEADER))
@@ -115,8 +115,8 @@ class ProfileControllerTest {
         @Test
         @DisplayName("Should return 404 when user not found")
         void shouldReturn404WhenUserNotFound() throws Exception {
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("nonexistent");
-            when(userRepository.findByUsername("nonexistent")).thenReturn(Optional.empty());
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(999L);
+            when(userRepository.findById(999L)).thenReturn(Optional.empty());
 
             mockMvc.perform(get("/api/profile")
                             .header("Authorization", VALID_AUTH_HEADER))
@@ -143,8 +143,8 @@ class ProfileControllerTest {
                     .theme(Theme.DARK)
                     .build();
 
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
             when(authService.updateProfile(eq(42L), eq("Updated"), eq("Name"), eq("updated@example.com"), eq(Theme.DARK)))
                     .thenReturn(updatedUser);
 
@@ -173,8 +173,8 @@ class ProfileControllerTest {
                     .theme(Theme.LIGHT)
                     .build();
 
-            when(jwtService.extractUsername(VALID_JWT)).thenReturn("testuser");
-            when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(testUser));
+            when(jwtService.extractUserId(VALID_JWT)).thenReturn(42L);
+            when(userRepository.findById(42L)).thenReturn(Optional.of(testUser));
             when(authService.updateProfile(eq(42L), eq("NewFirst"), isNull(), isNull(), isNull()))
                     .thenReturn(updatedUser);
 

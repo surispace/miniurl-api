@@ -22,6 +22,16 @@
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
 
+        <!-- Security: JWT Resource Server (Pattern B — Zero-Trust, reactive variant) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
         <!-- Redis for high-speed caching -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

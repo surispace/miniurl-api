@@ -1,5 +1,8 @@
 package com.miniurl.identity;
 
+import com.miniurl.identity.entity.Role;
+import com.miniurl.identity.entity.User;
+import com.miniurl.identity.entity.UserPrincipal;
 import com.miniurl.identity.service.JwtService;
 import com.miniurl.identity.service.KeyService;
 import io.jsonwebtoken.Claims;
@@ -8,10 +11,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -32,11 +35,24 @@ class JwtServiceTest {
         publicKey = keyService.getPublicKey();
     }
 
+    private UserPrincipal createTestPrincipal() {
+        User user = User.builder()
+                .id(42L)
+                .username("testuser")
+                .password("pass")
+                .firstName("Test")
+                .lastName("User")
+                .email("test@example.com")
+                .role(Role.builder().id(1L).name("USER").build())
+                .build();
+        return new UserPrincipal(user);
+    }
+
     @Test
-    @DisplayName("generateToken creates valid RS256-signed token with correct subject")
+    @DisplayName("generateToken creates valid RS256-signed token with enriched claims")
     void generateToken() {
-        UserDetails userDetails = User.withUsername("testuser").password("pass").roles("USER").build();
-        String token = jwtService.generateToken(userDetails);
+        UserPrincipal principal = createTestPrincipal();
+        String token = jwtService.generateToken(principal);
 
         Claims claims = Jwts.parser()
                 .verifyWith((java.security.interfaces.RSAPublicKey) publicKey)
@@ -45,15 +61,18 @@ class JwtServiceTest {
                 .getPayload();
 
         assertEquals("testuser", claims.getSubject());
+        assertEquals(42, claims.get("userId", Integer.class));
+        assertEquals("testuser", claims.get("username", String.class));
+        assertEquals(List.of("ROLE_USER"), claims.get("roles", List.class));
         assertNotNull(claims.getIssuedAt());
         assertNotNull(claims.getExpiration());
     }
 
     @Test
-    @DisplayName("generateToken with version claim")
+    @DisplayName("generateToken with version claim includes all enriched claims")
     void generateTokenWithVersion() {
-        UserDetails userDetails = User.withUsername("testuser").password("pass").roles("USER").build();
-        String token = jwtService.generateToken(userDetails, 2);
+        UserPrincipal principal = createTestPrincipal();
+        String token = jwtService.generateToken(principal, 2);
 
         Claims claims = Jwts.parser()
                 .verifyWith((java.security.interfaces.RSAPublicKey) publicKey)
@@ -62,6 +81,9 @@ class JwtServiceTest {
                 .getPayload();
 
         assertEquals("testuser", claims.getSubject());
+        assertEquals(42, claims.get("userId", Integer.class));
+        assertEquals("testuser", claims.get("username", String.class));
+        assertEquals(List.of("ROLE_USER"), claims.get("roles", List.class));
         assertEquals(2, claims.get("tokenVersion", Integer.class));
     }
 
@@ -74,8 +96,8 @@ class JwtServiceTest {
         otherKeyService.init();
         JwtService otherJwtService = new JwtService(otherKeyService, 3600000L);
 
-        UserDetails userDetails = User.withUsername("testuser").password("pass").roles("USER").build();
-        String token = otherJwtService.generateToken(userDetails);
+        UserPrincipal principal = createTestPrincipal();
+        String token = otherJwtService.generateToken(principal);
 
         assertThrows(Exception.class, () -> {
             Jwts.parser()
@@ -88,8 +110,8 @@ class JwtServiceTest {
     @Test
     @DisplayName("token expiration is set correctly")
     void tokenExpiration() {
-        UserDetails userDetails = User.withUsername("testuser").password("pass").roles("USER").build();
-        String token = jwtService.generateToken(userDetails);
+        UserPrincipal principal = createTestPrincipal();
+        String token = jwtService.generateToken(principal);
 
         Claims claims = Jwts.parser()
                 .verifyWith((java.security.interfaces.RSAPublicKey) publicKey)
@@ -104,10 +126,48 @@ class JwtServiceTest {
     @Test
     @DisplayName("extractUsername returns the subject from a valid token")
     void extractUsernameReturnsSubject() {
-        UserDetails userDetails = User.withUsername("testuser").password("pass").roles("USER").build();
-        String token = jwtService.generateToken(userDetails);
+        UserPrincipal principal = createTestPrincipal();
+        String token = jwtService.generateToken(principal);
 
         String username = jwtService.extractUsername(token);
         assertEquals("testuser", username);
+    }
+
+    @Test
+    @DisplayName("extractUserId returns the userId claim from a valid token")
+    void extractUserIdReturnsClaim() {
+        UserPrincipal principal = createTestPrincipal();
+        String token = jwtService.generateToken(principal);
+
+        Long userId = jwtService.extractUserId(token);
+        assertEquals(42L, userId);
+    }
+
+    @Test
+    @DisplayName("extractRoles returns the roles claim from a valid token")
+    void extractRolesReturnsClaim() {
+        UserPrincipal principal = createTestPrincipal();
+        String token = jwtService.generateToken(principal);
+
+        List<String> roles = jwtService.extractRoles(token);
+        assertEquals(List.of("ROLE_USER"), roles);
+    }
+
+    @Test
+    @DisplayName("generateToken with plain UserDetails (not UserPrincipal) still works")
+    void generateTokenWithPlainUserDetails() {
+        UserDetails userDetails = org.springframework.security.core.userdetails.User
+                .withUsername("plainuser").password("pass").roles("USER").build();
+        String token = jwtService.generateToken(userDetails);
+
+        Claims claims = Jwts.parser()
+                .verifyWith((java.security.interfaces.RSAPublicKey) publicKey)
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
+
+        assertEquals("plainuser", claims.getSubject());
+        // Plain UserDetails won't have userId/username/roles claims
+        assertNull(claims.get("userId"));
     }
 }
