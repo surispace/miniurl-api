@@ -1,0 +1,77 @@
+# Blackbox Exporter — JWKS Probe Configuration
+# =============================================
+# This config enables Prometheus to probe the JWKS endpoint and verify
+# that it returns valid RSA keys. Used by the CanaryJwksEndpointDown
+# and CanaryJwksKeyMissing alerts in plans/canary-monitoring-alerts.md.
+
+# ---
+# 1. Blackbox Exporter Module Configuration
+#    Add to blackbox.yml (typically mounted as ConfigMap)
+# ---
+
+# modules:
+#   jwks_check:
+#     prober: http
+#     timeout: 5s
+#     http:
+#       method: GET
+#       valid_status_codes: [200]
+#       fail_if_body_not_matches_regexp:
+#         - '"kty":"RSA"'
+#       preferred_ip_protocol: ip4
+
+# ---
+# 2. Prometheus Scrape Config
+#    Add to prometheus.yml under scrape_configs:
+# ---
+
+# scrape_configs:
+#   - job_name: 'blackbox-jwks'
+#     metrics_path: /probe
+#     params:
+#       module: [jwks_check]
+#     static_configs:
+#       - targets:
+#           - https://<INGRESS_HOST>/.well-known/jwks.json
+#     relabel_configs:
+#       - source_labels: [__address__]
+#         target_label: __param_target
+#       - source_labels: [__param_target]
+#         target_label: instance
+#       - target_label: __address__
+#         replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
+
+# ---
+# 3. Verification Commands
+#    Run these to validate the probe works before deploying:
+# ---
+
+# Test blackbox exporter directly:
+# kubectl exec -n monitoring deploy/blackbox-exporter -- wget -qO- \
+#   'http://localhost:9115/probe?target=https://<INGRESS_HOST>/.well-known/jwks.json&module=jwks_check' \
+#   | grep -E 'probe_success|probe_http_status_code'
+
+# Expected output:
+# probe_success 1
+# probe_http_status_code 200
+
+# Test JWKS endpoint directly:
+# curl -s https://<INGRESS_HOST>/.well-known/jwks.json | jq '.keys[0].kty'
+# Expected: "RSA"
+
+# Test that the endpoint contains at least one RSA key:
+# curl -s https://<INGRESS_HOST>/.well-known/jwks.json | jq '.keys | map(select(.kty == "RSA")) | length'
+# Expected: >= 1
+
+# ---
+# 4. PromQL Queries for Alert Validation
+# ---
+
+# Check if JWKS probe is succeeding:
+# probe_success{job="blackbox-jwks"}
+
+# Check HTTP status code of JWKS endpoint:
+# probe_http_status_code{job="blackbox-jwks"}
+
+# Check probe duration:
+# probe_duration_seconds{job="blackbox-jwks"}

@@ -1,0 +1,96 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      revision:
+        description: 'Revision to rollback to (0 = previous revision)'
+        required: false
+        type: string
+        default: '0'
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Rollback ${{ github.event.inputs.environment }}
+    runs-on: [self-hosted, home-server]
+    environment:
+      name: ${{ github.event.inputs.environment == 'prod' && 'production' || 'development' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Preflight — verify runner tools and K3s access
+        run: |
+          echo "=== Runner Preflight ==="
+          echo ""
+          echo "--- kubectl ---"
+          kubectl version --client 2>/dev/null || true
+          echo ""
+          echo "--- helm ---"
+          helm version --short 2>/dev/null || { echo "FATAL: helm not found"; exit 1; }
+          echo ""
+          echo "--- kubeconfig ---"
+          echo "KUBECONFIG: ${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Current context: $(kubectl config current-context 2>/dev/null || echo 'NOT SET')"
+          echo ""
+          echo "--- cluster ---"
+          kubectl cluster-info 2>/dev/null || true
+          kubectl get nodes 2>/dev/null || { echo "FATAL: Cannot access K3s cluster"; exit 1; }
+          echo ""
+          echo "=== Preflight PASSED ==="
+
+      - name: Show Helm history
+        run: |
+          echo "=== Helm Release History ==="
+          helm history miniurl -n miniurl --max 10
+
+      - name: Execute rollback
+        id: rollback
+        run: |
+          REV="${{ github.event.inputs.revision }}"
+          if [ "$REV" = "0" ]; then
+            echo "Rolling back to previous revision..."
+            helm rollback miniurl -n miniurl --timeout 5m --wait
+          else
+            echo "Rolling back to revision ${REV}..."
+            helm rollback miniurl "$REV" -n miniurl --timeout 5m --wait
+          fi
+          NEW_REV=$(helm history miniurl -n miniurl --max 1 -o json | grep -o '"revision":[0-9]*' | head -1 | cut -d: -f2)
+          echo "new_revision=${NEW_REV}" >> $GITHUB_OUTPUT
+          echo "Rolled back to revision: ${NEW_REV}"
+
+      - name: Verify deployments
+        run: |
+          kubectl -n miniurl get all
+          for service in api-gateway eureka-server identity-service url-service redirect-service feature-service notification-service analytics-service; do
+            echo "Checking ${service}..."
+            kubectl -n miniurl rollout status "deployment/${service}" --timeout=120s || true
+          done
+
+      - name: Smoke test
+        run: |
+          GW_IP=$(kubectl -n miniurl get svc api-gateway -o jsonpath='{.spec.clusterIP}')
+          if [ -n "$GW_IP" ]; then
+            curl -fsS "http://${GW_IP}/actuator/health" || echo "WARN: Health check failed"
+          fi
+
+      - name: Print rollback summary
+        run: |
+          echo "============================================"
+          echo "  Rollback Complete"
+          echo "============================================"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "New Revision: ${{ steps.rollback.outputs.new_revision }}"
+          echo ""
+          helm history miniurl -n miniurl --max 5

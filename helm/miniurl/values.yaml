@@ -1,0 +1,566 @@
+namespace: miniurl
+
+globalConfig:
+  APP_BASE_URL: "http://api.miniurl.com"
+  APP_UI_BASE_URL: "http://miniurl.com"
+  SPRING_PROFILES_ACTIVE: "prod"
+  EUREKA_SERVER_URL: "http://eureka-server:8761/eureka/"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  MYSQL_URL_HOST: "mysql-url"
+  MYSQL_URL_PORT: "3306"
+  MYSQL_URL_DB: "url_db"
+  MYSQL_IDENTITY_HOST: "mysql-identity"
+  MYSQL_IDENTITY_PORT: "3306"
+  MYSQL_IDENTITY_DB: "identity_db"
+  MYSQL_FEATURE_HOST: "mysql-feature"
+  MYSQL_FEATURE_PORT: "3306"
+  MYSQL_FEATURE_DB: "feature_db"
+  MYSQL_ANALYTICS_HOST: "mysql-analytics"
+  MYSQL_ANALYTICS_PORT: "3306"
+  MYSQL_ANALYTICS_DB: "analytics_db"
+  # IMAGE_TAG is set by CI for legacy GHCR mode (single tag for all services)
+  # IMAGE_REPOSITORY is set for Docker Hub single-repo mode with per-service tags
+  IMAGE_REPOSITORY: "docker.io/surispace/miniurl-api"
+
+services:
+  api-gateway:
+    replicas: 2
+    image:
+      repository: ghcr.io/surispace/miniurl-api/api-gateway
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8080
+        servicePort: 80
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      cpu: 70
+      memory: 80
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8080
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      minAvailable: 1
+    env: []
+
+  eureka-server:
+    replicas: 1
+    image:
+      repository: ghcr.io/surispace/miniurl-api/eureka-server
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8761
+        servicePort: 8761
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: false
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8761
+        initialDelaySeconds: 90
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8761
+        initialDelaySeconds: 60
+        periodSeconds: 10
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      maxUnavailable: 0
+    env: []
+
+  identity-service:
+    replicas: 2
+    image:
+      repository: ghcr.io/surispace/miniurl-api/identity-service
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8081
+        servicePort: 8081
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      cpu: 70
+      memory: 80
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8081
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8081
+        initialDelaySeconds: 30
+        periodSeconds: 10
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      minAvailable: 1
+    env:
+      - name: SPRING_DATASOURCE_URL
+        value: "jdbc:mysql://mysql-identity:3306/identity_db"
+      - name: SPRING_DATASOURCE_USERNAME
+        value: "root"
+      - name: SPRING_DATASOURCE_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secrets
+            key: MYSQL_ROOT_PASSWORD
+      - name: JWT_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: jwt-rsa-keys
+            key: jwt-secret
+
+  url-service:
+    replicas: 2
+    image:
+      repository: ghcr.io/surispace/miniurl-api/url-service
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8081
+        servicePort: 8081
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      cpu: 70
+      memory: 80
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8081
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8081
+        initialDelaySeconds: 30
+        periodSeconds: 10
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      minAvailable: 1
+    env:
+      - name: SPRING_DATASOURCE_URL
+        value: "jdbc:mysql://mysql-url:3306/url_db"
+      - name: SPRING_DATASOURCE_USERNAME
+        value: "root"
+      - name: SPRING_DATASOURCE_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secrets
+            key: MYSQL_ROOT_PASSWORD
+
+  redirect-service:
+    replicas: 3
+    image:
+      repository: ghcr.io/surispace/miniurl-api/redirect-service
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8082
+        servicePort: 8082
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 20
+      cpu: 70
+      memory: 80
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8082
+        initialDelaySeconds: 30
+        periodSeconds: 10
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8082
+        initialDelaySeconds: 15
+        periodSeconds: 5
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      minAvailable: 2
+    env: []
+
+  feature-service:
+    replicas: 2
+    image:
+      repository: ghcr.io/surispace/miniurl-api/feature-service
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8083
+        servicePort: 8083
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: false
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8083
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8083
+        initialDelaySeconds: 30
+        periodSeconds: 10
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      minAvailable: 1
+    env:
+      - name: SPRING_DATASOURCE_URL
+        value: "jdbc:mysql://mysql-feature:3306/feature_db"
+      - name: SPRING_DATASOURCE_USERNAME
+        value: "root"
+      - name: SPRING_DATASOURCE_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secrets
+            key: MYSQL_ROOT_PASSWORD
+
+  notification-service:
+    replicas: 1
+    image:
+      repository: ghcr.io/surispace/miniurl-api/notification-service
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8082
+        servicePort: 8082
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: false
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8082
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8082
+        initialDelaySeconds: 30
+        periodSeconds: 10
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      maxUnavailable: 0
+    env:
+      - name: SMTP_HOST
+        valueFrom:
+          secretKeyRef:
+            name: smtp-credentials
+            key: SMTP_HOST
+      - name: SMTP_PORT
+        valueFrom:
+          secretKeyRef:
+            name: smtp-credentials
+            key: SMTP_PORT
+      - name: SMTP_USERNAME
+        valueFrom:
+          secretKeyRef:
+            name: smtp-credentials
+            key: SMTP_USERNAME
+      - name: SMTP_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: smtp-credentials
+            key: SMTP_PASSWORD
+
+  analytics-service:
+    replicas: 1
+    image:
+      repository: ghcr.io/surispace/miniurl-api/analytics-service
+      tag: ""
+      pullPolicy: Always
+    ports:
+      - name: http
+        containerPort: 8083
+        servicePort: 8083
+    serviceType: ClusterIP
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    terminationGracePeriodSeconds: 30
+    hpa:
+      enabled: false
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8083
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8083
+        initialDelaySeconds: 30
+        periodSeconds: 10
+    prometheus:
+      scrape: true
+      path: /actuator/prometheus
+    securityContext:
+      fsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    pdb:
+      maxUnavailable: 0
+    env:
+      - name: SPRING_DATASOURCE_URL
+        value: "jdbc:mysql://mysql-analytics:3306/analytics_db"
+      - name: SPRING_DATASOURCE_USERNAME
+        value: "root"
+      - name: SPRING_DATASOURCE_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secrets
+            key: MYSQL_ROOT_PASSWORD
+
+ingress:
+  enabled: true
+  host: api.miniurl.com
+  className: nginx
+  sslRedirect: "true"
+  tls: true
+  clusterIssuer: letsencrypt-prod
+  annotations: {}
+
+canary:
+  enabled: false
+  weight: 10
+
+serviceAccount:
+  create: true
+  name: miniurl-sa
+  annotations: {}
+
+networkPolicy:
+  enabled: true
+  ingressNamespace: ingress-nginx
+
+pdb:
+  enabled: true
+
+imagePullSecrets: []
+
+resourceQuota:
+  enabled: true
+  limits:
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "8"
+    limits.memory: "16Gi"
+    persistentvolumeclaims: "10"
+    services: "20"
+    secrets: "20"
+    configmaps: "10"

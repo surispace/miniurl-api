@@ -1,0 +1,21 @@
+# Eureka Server Configuration - Production Profile
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+logging:
+  level:
+    com.netflix.eureka: WARN
+    com.netflix.discovery: WARN
+    org.springframework.web: WARN
+
+# Ensure actuator endpoints remain exposed in production
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: never

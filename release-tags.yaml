@@ -1,0 +1,3 @@
+# Release image tags - promoted from dev
+# Updated by promote-to-release.yml
+services: {}

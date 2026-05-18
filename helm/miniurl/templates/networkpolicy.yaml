@@ -1,0 +1,222 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+# Default deny-all ingress from other namespaces, allow within namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-cross-namespace
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-default") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+    {{- if .Values.networkPolicy.ingressNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+    {{- end }}
+
+---
+# API Gateway: accepts traffic from anywhere (public entry point)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-gateway-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-api-gateway") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}
+
+---
+# Eureka Server: accepts traffic from all pods in namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eureka-server-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-eureka") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: eureka-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8761
+
+---
+# Identity Service: accepts traffic from API Gateway and other services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: identity-service-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-identity") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: identity-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: url-service
+        - podSelector:
+            matchLabels:
+              app: feature-service
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# URL Service: accepts traffic from API Gateway, identity-service, and redirect-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: url-service-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-url") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: url-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: identity-service
+        - podSelector:
+            matchLabels:
+              app: redirect-service
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# Redirect Service: accepts traffic from API Gateway and url-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redirect-service-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-redirect") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: redirect-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: url-service
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Feature Service: accepts traffic from API Gateway and identity-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: feature-service-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-feature") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: feature-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: identity-service
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# Notification Service: accepts traffic from within namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notification-service-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-notification") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: notification-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Analytics Service: accepts traffic from within namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: analytics-service-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "networkpolicy-analytics") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: analytics-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}

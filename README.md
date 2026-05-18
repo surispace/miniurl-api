@@ -1,2204 +1,264 @@
-# MyURL API - URL Shortener API
+# MiniURL API - High-Throughput URL Shortener (Microservices)
 
-A RESTful URL shortener API built with Spring Boot, featuring user management, role-based access control, JWT authentication, rate limiting, feature flags, email invitations, and usage tracking.
+MiniURL is a scalable, high-performance URL shortening system migrated from a monolith to a microservices architecture. It is designed to handle high throughput (targeting ~10k redirects/sec) using a reactive redirect path, distributed caching, and an event-driven architecture.
 
-![Java](https://img.shields.io/badge/Java-17-blue)
-![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2-green)
-![MySQL](https://img.shields.io/badge/Database-MySQL-orange)
-![Docker](https://img.shields.io/badge/Docker-Hub-blue)
-![Swagger](https://img.shields.io/badge/OpenAPI-3.0-green)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-94%20passing-brightgreen)
+## Architecture Overview
 
-## ⚡ Quick Start
+The system is split into several specialized services to ensure independent scalability and fault isolation.
 
-### 📖 Full Setup Guide
-For detailed setup instructions, see [SETUP_GUIDE.md](SETUP_GUIDE.md)
+### Service Map
+- **API Gateway**: The single entry point. Handles routing, RS256 JWT validation (via JWKS), and Redis-backed distributed rate limiting.
+- **Identity Service**: Manages users, authentication, and RSA key pairs for asymmetric JWT signing. OTP codes and email verification state are stored in Redis (not the database).
+- **URL Service**: Handles URL creation, management, and generates collision-free short codes using Snowflake IDs.
+- **Redirect Service**: A dedicated **Reactive (WebFlux)** service optimized for the "hot path" (`/r/{code}`). Uses a "Redis-first" resolution strategy.
+- **Feature Service**: Manages global and user-specific feature flags with Redis caching.
+- **Notification Service**: Asynchronous worker that consumes events from Kafka to send emails.
+- **Analytics Service**: Asynchronous worker that consumes click events from Kafka to persist analytics data.
+- **Eureka Server**: Provides service discovery for all microservices.
 
-### Option 1: Docker Compose (Recommended)
-
-```bash
-# 1. Clone repository
-git clone https://github.com/gallantsuri1/miniurl.git
-cd miniurl
-
-# 2. Copy environment file
-cp .env.example .env
-
-# 3. Generate secure JWT secret (REQUIRED)
-echo "APP_JWT_SECRET=$(openssl rand -base64 64)" >> .env
-
-# 4. Configure database (MySQL runs in its own container)
-# Edit .env with: SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
-
-# 5. Configure admin credentials (REQUIRED — see "🔑 Admin Credentials Setup" section below)
-# Edit scripts/init-db.sql with your username, email, and BCrypt password hash
-
-# 6. Initialize database (run once, outside Docker)
-mysql -h <mysql-host> -u <user> -p < scripts/init-db.sql
-
-# 7. Start the application
-docker compose up -d
-
-# 8. Check status
-docker compose ps
-docker compose logs -f miniurl-api
-```
-
-**Access:** http://localhost:8080
-**Login:** Use the credentials you configured in `scripts/init-db.sql`
-
-### Option 2: Local Development
-
-```bash
-# Prerequisites: Java 17, Maven, MySQL 8.0
-
-# 1. Start MySQL
-docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=rootpass \
-  -e MYSQL_DATABASE=miniurldb -p 3306:3306 mysql:8.0
-
-# 2. Initialize database
-mysql -h localhost -u root -prootpass miniurldb < scripts/init-db.sql
-
-# 3. Clone and configure
-git clone https://github.com/gallantsuri1/miniurl.git
-cd miniurl
-cp .env.example .env
-echo "APP_JWT_SECRET=$(openssl rand -base64 64)" >> .env
-
-# 4. Configure CORS and base URL (REQUIRED for UI access)
-export APP_BASE_URL=http://localhost:8080
-export APP_UI_BASE_URL=http://localhost:3000
-export APP_CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080
-
-# 5. Build and run
-mvn clean package -DskipTests
-java -jar target/miniurl-api-1.0.0.jar --spring.profiles.active=dev
-```
-
-**Access:** http://localhost:8080
-**Swagger UI:** http://localhost:8080/swagger-ui.html (dev mode only)
-
-### Option 3: Development Mode with Hot Reload
-
-```bash
-git clone https://github.com/gallantsuri1/miniurl.git
-cd miniurl
-cp .env.example .env
-echo "APP_JWT_SECRET=$(openssl rand -base64 64)" >> .env
-echo "APP_BASE_URL=http://localhost:8080" >> .env
-echo "APP_UI_BASE_URL=http://localhost:3000" >> .env
-echo "APP_CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080" >> .env
-
-# Ensure MySQL is running locally and database is initialized:
-mysql -h localhost -u root -prootpass miniurldb < scripts/init-db.sql
-
-# Start with hot reload (connects to MySQL on host via host.docker.internal)
-docker compose -f docker-compose.dev.yml up
-```
+### Key Design Patterns
+- **Asymmetric Security**: Uses **RS256**. The Identity Service signs tokens with a private key; the Gateway validates them using a public key fetched via a JWKS endpoint.
+- **Event-Driven Communication**: Uses **Apache Kafka** for non-blocking operations (Notifications, Analytics).
+- **Reliability**: Implements the **Outbox Pattern** in Identity and URL services to ensure atomic database updates and guaranteed event delivery.
+- **High Throughput**: The Redirect Service uses non-blocking I/O (Spring WebFlux) and Redis to minimize latency.
+- **Database per Service**: Physical separation of MySQL databases to prevent coupling and allow independent scaling.
+- **Redis-First OTP**: Login OTP codes are stored in Redis with a 5-minute TTL instead of the database, reducing DB writes and leveraging Redis auto-expiry for cleanup.
 
 ---
 
-## 🔑 Admin Credentials Setup
+## Tech Stack
 
-**Before running the application, you MUST configure admin credentials in `scripts/init-db.sql`.**
-
-### Step 1: Generate a BCrypt Password Hash
-
-Generate a secure BCrypt hash for your desired admin password:
-
-**Option A — Using Python:**
-```bash
-python3 -c "import bcrypt; print(bcrypt.hashpw(b'YourStrongPassword123!', bcrypt.gensalt()).decode())"
-```
-
-**Option B — Using an online tool:**
-Visit [bcrypt-generator.com](https://bcrypt-generator.com/) and enter your password.
-
-> **Note:** Copy the generated hash (it will look like `$2a$10$...`)
-
-### Step 2: Edit `scripts/init-db.sql`
-
-Open `scripts/init-db.sql` and locate the admin user INSERT statement (around line 239). Update the placeholders:
-
-```sql
-SELECT 'your-email@example.com', 'Your', 'Name', 'youradminuser',
-       '$2a$10$YOUR_GENERATED_BCRYPT_HASH_HERE',
-       1, true, true, 'ACTIVE', 0, 0
-```
-
-| Placeholder | Description | Example |
-|-------------|-------------|---------|
-| `<YOUR_ADMIN_EMAIL>` | Admin email address | `admin@example.com` |
-| `<Admin_FirstName>` | Admin first name | `John` |
-| `<Admin_LastName>` | Admin last name | `Doe` |
-| `<YOUR_ADMIN_USERNAME>` | Admin username (3-50 chars, alphanumeric + underscore) | `johndoe` |
-| `<YOUR_BCRYPT_PASSWORD_HASH>` | Full BCrypt hash from Step 1 | `$2a$10$...` |
-
-### Step 3: Run the Init Script
-
-```bash
-# Docker (MySQL container)
-docker exec -i mysql_db_miniurl mysql -u root -p'<password>' miniurldb < scripts/init-db.sql
-
-# Local MySQL
-mysql -h localhost -u root -p miniurldb < scripts/init-db.sql
-```
-
-### Step 4: Login
-
-Use the credentials you configured to log in:
-- **Username:** The value you set for `<YOUR_ADMIN_USERNAME>`
-- **Password:** The plain-text password you hashed in Step 1
-
-> **⚠️ Important:**
-> - The `must_change_password` flag is set to `true` — you will be forced to change the password on first login
-> - Never commit your real credentials to version control
-> - Generate a unique password for each deployment
+- **Backend**: Java 21, Spring Boot 3.2.0, Spring Cloud 2023.0.0
+- **Reactive Stack**: Spring WebFlux (Redirect Service)
+- **Service Discovery**: Netflix Eureka
+- **API Gateway**: Spring Cloud Gateway
+- **Messaging**: Apache Kafka
+- **Caching/Rate Limiting**: Redis
+- **Databases**: MySQL (Multiple instances)
+- **Observability**: OpenTelemetry, Micrometer, Prometheus, Grafana
+- **Deployment**: Kubernetes, Helm, Docker, GitHub Actions
 
 ---
 
-## 🔐 Security Notice
-
-**Before deploying to production:**
-
-1. **Generate JWT Secret**: `APP_JWT_SECRET=$(openssl rand -base64 64)`
-2. **Configure Admin Credentials**: Follow the Admin Credentials Setup section above
-3. **Enable HTTPS**: Always use HTTPS in production
-4. **Use Production Profile**: Deploy with `prod` profile to disable Swagger/OpenAPI
-5. **Configure CORS**: Set `APP_CORS_ALLOWED_ORIGINS` to your frontend domain(s)
-6. **Set Base URL**: Set `APP_BASE_URL` to your frontend URL
-7. **Review Security Checklist** in `.env.example`
-
-## 🔄 Application Modes
-
-| Feature | Development (`dev`) | Production (`prod`) |
-|---------|---------------------|---------------------|
-| **Swagger/OpenAPI** | ✅ Enabled | ❌ Disabled |
-| **SQL Logging** | ✅ Verbose | ❌ Disabled |
-| **Logging Level** | DEBUG | INFO/WARN |
-
-**Switch Profiles:**
-```bash
-# Maven
-mvn spring-boot:run -Dspring-boot.run.profiles=prod
-
-# Docker
-docker run -e SPRING_PROFILES_ACTIVE=prod miniurl/miniurl-api:latest
-```
-
----
-
-## 🚀 Features
-
-### Core Functionality
-- **URL Shortening** - Auto-generated 6-character codes or custom aliases
-- **Click Tracking** - Track access count for each URL
-- **User Ownership** - URLs belong to the creator
-- **Public Redirects** - No auth required for `/r/{shortCode}`
-- **URL Creation Limits** - Fair usage policy:
-  - **10 URLs per minute** - Auto-clears after 60 seconds
-  - **100 URLs per day** - Resets at midnight
-  - **1000 URLs per month** - Resets on 1st of month
-  - **API Endpoint** - `/api/urls/usage-stats` to view usage
-
-### URL Shortening Validation Rules
-
-| Field | Rule | Valid Examples | Invalid Examples |
-|-------|------|---------------|-----------------|
-| **url** | Required, max 2000 chars, no spaces, no self-referencing | `https://example.com` | `https://url.suricloud.uk` (app's own domain) |
-| **alias** | Optional, 3-10 chars, alphanumeric only | `abc`, `mylink`, `url2026` | `ab` (too short), `mylink12345` (too long), `my-link` (special chars), `my link` (space) |
-
----
-
-### API Input Validation
-
-All API endpoints enforce strict input validation. Invalid requests return `400 Bad Request` with descriptive error messages.
-
-#### Authentication Endpoints
-
-| Endpoint | Field | Constraints |
-|----------|-------|-------------|
-| **POST `/api/auth/signup`** | firstName | Required, 1-100 chars, letters/spaces/hyphens/apostrophes only |
-| | lastName | Required, 1-100 chars, letters/spaces/hyphens/apostrophes only |
-| | username | Required, 3-50 chars, starts with letter, alphanumeric + underscore |
-| | password | Required, 8-255 chars |
-| | invitationToken | Required, max 255 chars |
-| **POST `/api/auth/login`** | username | Required, max 255 chars |
-| | password | Required, max 255 chars |
-| **POST `/api/auth/verify-otp`** | username | Required, max 255 chars |
-| | otp | Required, exactly 6 digits (0-9) |
-| **POST `/api/auth/resend-otp`** | username | Required, max 255 chars |
-| **POST `/api/auth/forgot-password`** | email | Required, valid email format, max 255 chars |
-| **POST `/api/auth/reset-password`** | token | Required, max 255 chars |
-| | newPassword | Required, 8-255 chars |
-| **POST `/api/auth/delete-account`** | password | Required, min 8 chars |
-
-#### Profile Endpoints
-
-| Endpoint | Field | Constraints |
-|----------|-------|-------------|
-| **PUT `/api/profile`** | firstName | Optional, max 100 chars, letters/spaces/hyphens/apostrophes only |
-| | lastName | Optional, max 100 chars, letters/spaces/hyphens/apostrophes only |
-| | email | Optional, valid email format, max 255 chars |
-| | theme | Optional, one of: LIGHT, DARK, OCEAN, FOREST |
-
-#### URL Endpoints
-
-| Endpoint | Field | Constraints |
-|----------|-------|-------------|
-| **POST `/api/urls`** | url | Required, max 2000 chars, no spaces, http/https only |
-| | alias | Optional, 3-10 chars, alphanumeric only |
-| **GET `/api/urls`** | page | Optional, min 0 (default: 0) |
-| | size | Optional, 1-100 (default: 10) |
-| | sortBy | Optional, one of: id, originalUrl, shortCode, accessCount, createdAt |
-| | sortDirection | Optional, asc or desc (default: desc) |
-
----
-
-### User Management
-- **Invitation-Only Registration** - Admin sends email invites to users
-- **Role-Based Access Control** - ADMIN and USER roles
-- **Profile Management** - Update name, email, password
-- **Account Settings** - Export data (JSON), reset password via email, delete account
-- **Admin Dashboard** - User management (activate, deactivate, suspend, change roles) via API
-- **Email Invitations** - Admin-only feature to invite users via email
-
-### Feature Management
-- **Feature Flags** - Toggle features without code changes
-- **Role-Based Features**: Features are organized by target role:
-  - **USER Role**: Features that apply to regular users (Dashboard, Profile, Settings, Export)
-  - **ADMIN Role**: Admin-only management features (Email Invites, User Management, Feature Management)
-- **Admin Control**: ADMIN users can toggle features for either role via API
-- **Real-Time Enforcement** - API level checks
-
-### Authentication & Security
-- **JWT Authentication** - 60-minute tokens
-- **Two-Factor Authentication (2FA)** - OTP verification after login (toggleable via feature flag)
-- **Email Invitation** - Admin-sent invites prove email ownership (no verification needed)
-- **Password Reset** - Token-based reset flow
-- **BCrypt Password Hashing** - Secure storage
-- **Account Lockout** - 5-minute lockout after 5 failed attempts
-- **CORS Protection** - Configurable allowed origins via environment variable
-- **Rate Limiting** - Dual-layer rate limiting (per-IP + per-username) for login endpoints, per-IP for all other sensitive endpoints
-
----
-
-## 📋 Prerequisites
-
-- Java 17 or higher
-- Maven 3.8+
-- MySQL 8.0+ (running externally)
-- Docker & Docker Compose (optional)
-
-## 🛠️ Running Locally
-
-### 1. Database Setup
-
-```bash
-# Initialize MySQL database
-bash scripts/init-db.sql
-# Or
-bash scripts/init-db.sh
-```
-
-### 2. Configure Environment
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-```bash
-# Database (macOS/Windows)
-SPRING_DATASOURCE_URL=jdbc:mysql://host.docker.internal:3306/miniurldb
-SPRING_DATASOURCE_USERNAME=root
-SPRING_DATASOURCE_PASSWORD=rootpass
-
-# Linux users: Use host IP (e.g., 172.17.0.1)
-# SMTP (optional)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=your-email@gmail.com
-SMTP_PASSWORD=your-app-password
-```
-
-### 3. Run Application
-
-```bash
-mvn spring-boot:run
-# Or
-mvn clean package -DskipTests
-java -jar target/miniurl-api-1.0.0.jar
-```
-
----
-
-## 🐳 Docker Deployment
-
-MySQL runs in its own container — the `docker-compose.yml` only manages the API container.
+## Getting Started
 
 ### Prerequisites
+- **JDK 21** or higher
+- **Maven 3.8+**
+- **Docker & Docker Compose**
+- **kubectl** + **Helm 3.14+** (for Kubernetes deployment)
+- **Minikube** (optional, for local K8s testing)
 
-- Docker & Docker Compose installed
-- MySQL instance accessible from the Docker network
-- Database initialized with `scripts/init-db.sql` (manual step)
-
-### Initialize Database
-
-Run the init script against your MySQL container:
-
-```bash
-# Method 1: Interactive (prompts for password — recommended)
-docker exec -i mysql_db_miniurl mysql -u root -p miniurldb < scripts/init-db.sql
-
-# Method 2: Direct (quote password if it contains special characters like !@#$)
-docker exec -i mysql_db_miniurl mysql -u root -p'<password>' miniurldb < scripts/init-db.sql
-```
-
-**Verify initialization:**
+### 1. Local Development (Docker Compose)
 
 ```bash
-docker exec -i mysql_db_miniurl mysql -u root -p'<password>' miniurldb -e "
-  SELECT COUNT(*) AS roles FROM roles;
-  SELECT COUNT(*) AS features FROM features;
-  SELECT COUNT(*) AS global_flags FROM global_flags;
-"
-```
-
-### Using Docker Compose
-
-MySQL and the API run as separate compose stacks on the same host.
-
-```bash
-# 1. Start MySQL
-docker compose -f docker-compose-mysql.yml up -d
-
-# 2. Initialize database (run once)
-docker exec -i mysql_db_miniurl mysql -u root -p miniurldb < scripts/init-db.sql
-
-# 3. Configure environment
-cp .env.example .env
-# Edit .env: set SPRING_DATASOURCE_URL to jdbc:mysql://mysql_db_miniurl:3306/miniurldb...
-# Set SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD, APP_JWT_SECRET
-
-# 4. Start the API
-docker compose pull
 docker compose up -d
-
-# View logs
-docker compose logs -f miniurl-api
-
-# Stop
-docker compose down
-docker compose -f docker-compose-mysql.yml down
 ```
 
-### Nginx Reverse Proxy (Optional)
+Starts all 8 services plus Kafka, Zookeeper, Redis, MySQL, Prometheus, and Grafana.
 
-Route all traffic through a single port (8080), splitting between API and UI:
+### 2. Build the Project
 
 ```bash
-# Start Nginx proxy
-docker compose -f docker-compose-nginx.yml up -d
+mvn clean install -DskipTests
 ```
 
-**Routing:**
-| Path | Backend | Port |
-|------|---------|------|
-| `/api/*` | MyURL API | 8090 |
-| `/r/*` | Short URL redirects | 8090 |
-| `/*` | Frontend UI | 3000 |
+### 3. Running Individual Services
 
-**Update your `.env`:**
-```bash
-APP_BASE_URL=http://localhost:8080
-APP_UI_BASE_URL=http://localhost:8080
-APP_CORS_ALLOWED_ORIGINS=http://localhost:8080
-```
-
-**Test routing:**
-```bash
-curl http://localhost:8080/api/health   # → API (8090)
-curl http://localhost:8080/r/ABC123     # → API redirect (8090)
-curl http://localhost:8080/             # → UI (3000)
-```
-
-### Production Deployment (Docker Hub Image)
-
-Images are published to `gallantsuri1/miniurl-api`:
-
-| Tag | Description |
-|-----|-------------|
-| `main` | Latest from main branch |
-| `v1.0.0` | Specific release version |
-| `sha-<hash>` | Specific commit SHA |
-
-**Pull and deploy:**
+**Order of startup:**
+1. `eureka-server`
+2. `identity-service`, `url-service`, `feature-service`
+3. `api-gateway`, `redirect-service`
+4. `notification-service`, `analytics-service`
 
 ```bash
-docker pull gallantsuri1/miniurl-api:v1.0.0
-
-docker run -d --name miniurl \
-  -e SPRING_DATASOURCE_URL="jdbc:mysql://<mysql-host>:3306/miniurldb?useSSL=false&serverTimezone=UTC" \
-  -e SPRING_DATASOURCE_USERNAME="<db-user>" \
-  -e SPRING_DATASOURCE_PASSWORD="<db-password>" \
-  -e APP_JWT_SECRET="your-secure-jwt-secret-min-32-chars" \
-  -e SPRING_PROFILES_ACTIVE=prod \
-  -e APP_BASE_URL="https://api.example.com" \
-  -e APP_UI_BASE_URL="https://example.com" \
-  -e APP_CORS_ALLOWED_ORIGINS="https://example.com" \
-  -p 8080:8080 \
-  gallantsuri1/miniurl-api:v1.0.0
+mvn spring-boot:run -pl identity-service
 ```
 
-**Build and push your own image:**
+### 4. Local Kubernetes (Minikube)
 
 ```bash
-# Build
-docker build -t gallantsuri1/miniurl-api:v1.0.0 .
+# 1. Start Minikube
+./scripts/local/minikube-start.sh
 
-# Push to Docker Hub
-docker push gallantsuri1/miniurl-api:v1.0.0
+# 2. Build all service images inside Minikube
+./scripts/local/minikube-build-images.sh
+
+# 3. Deploy via Helm
+./scripts/local/minikube-deploy.sh
+
+# 4. Smoke test
+./scripts/local/minikube-smoke-test.sh
 ```
 
-### Custom Image Reference
+See [Local Minikube Development](docs/development/local-minikube.md) for the full guide.
 
-Use a different image/tag by setting `DOCKER_IMAGE` in `.env`:
+### 5. Kubernetes Deployment (Helm)
+
+MiniURL is deployed via a **Helm chart** ([`helm/miniurl/`](helm/miniurl/)) — the single source of truth for all Kubernetes resources.
+
+| Environment | Values File | Notes |
+|-------------|-------------|-------|
+| **Minikube (local)** | `values-local.yaml` | `pullPolicy: Never`, local images |
+| **Development** | `values-dev.yaml` | CI auto-deploy on push to main |
+| **Home Server (K3s)** | `values-home.yaml` | Traefik ingress, ServiceLB, self-hosted runner |
+| **Production** | `values-prod.yaml` | NGINX ingress, HPA, RollingUpdate deployment |
 
 ```bash
-# .env
-DOCKER_IMAGE=gallantsuri1/miniurl-api:v1.0.0
+# Example: deploy to dev with per-service image tags
+helm upgrade --install miniurl ./helm/miniurl \
+  --values ./helm/miniurl/values-dev.yaml \
+  --set services.identity-service.image.tag=identity-service-dev-abc12345 \
+  --namespace miniurl --create-namespace --wait --atomic
 ```
 
-### Build Locally
-
-```bash
-docker build -t miniurl-api:local .
-
-docker run -d --name miniurl-app \
-  -e SPRING_DATASOURCE_URL="jdbc:mysql://<mysql-host>:3306/miniurldb" \
-  -e SPRING_DATASOURCE_USERNAME="<db-user>" \
-  -e SPRING_DATASOURCE_PASSWORD="<db-password>" \
-  -e APP_JWT_SECRET="your-secure-jwt-secret" \
-  -e APP_BASE_URL="http://localhost:8080" \
-  -e APP_UI_BASE_URL="http://localhost:3000" \
-  -e SPRING_PROFILES_ACTIVE=dev \
-  -p 8080:8080 \
-  miniurl-api:local
-```
-
-### Trigger a Release
-
-Pushing a version tag triggers the CI workflow: **build → publish Docker image → notify via GitHub Issue**.
-
-```bash
-# Ensure you're on main/master
-git checkout main
-git pull origin main
-
-# Tag the release (semantic versioning)
-git tag v1.0.0
-
-# Push tag to trigger release
-git push origin v1.0.0
-```
-
-**What happens:**
-1. **Docker image** built and pushed to Docker Hub with tags: `v1.0.0`, `latest`
-2. **GitHub Issue** created and assigned to you — GitHub sends you an email notification with build details
-
-**Manual trigger** (re-run or build a specific tag):
-- Go to **Actions → Build and Publish Docker Image → Run workflow**
-- Enter the tag (e.g., `v1.0.0`) and click **Run workflow**
-
-**Required secrets** (GitHub → Settings → Secrets and variables → Actions):
-| Secret | Description |
-|--------|-------------|
-| `DOCKER_USER` | Your Docker Hub username |
-| `DOCKER_API_TOKEN` | Docker Hub access token ([generate](https://hub.docker.com/settings/security)) |
-
-**Notes:**
-- Only works on `main`/`master` branches
-- Tag must be on the latest commit of `main`/`master`
-- On failure, a GitHub Issue is created with the build error and link to logs
-- Workflow logs: `Actions → Build and Publish Docker Image`
+All CI deploys use immutable image tags (`{service}-dev-{sha}` or `{service}-release-{version}`) — mutable tags like `latest` are never used in deployed environments.
 
 ---
 
-## 📡 Endpoints
+## CI/CD Pipeline
 
-### REST API
-| Method | Endpoint | Description | Auth |
-|--------|----------|-------------|------|
-| POST | `/api/auth/login` | Login (returns JWT or OTP pending if 2FA enabled) | No |
-| POST | `/api/auth/verify-otp` | Verify OTP to complete 2FA login | No |
-| POST | `/api/auth/resend-otp` | Resend OTP for 2FA login | No |
-| POST | `/api/auth/signup` | Register new user (invitation token required) | No |
-| GET | `/api/auth/verify-email-invite?token={token}` | Validate email invitation token | No |
-| GET | `/api/auth/verify-email?token={token}` | Validate password reset token | No |
-| POST | `/api/auth/forgot-password` | Request password reset | No |
-| POST | `/api/auth/reset-password` | Reset password | No |
-| GET | `/api/profile` | Get user profile | Yes |
-| PUT | `/api/profile` | Update profile | Yes |
-| POST | `/api/urls` | Create short URL | Yes |
-| GET | `/api/urls` | Get user's URLs (paginated) | Yes |
-| GET | `/api/urls/{id}` | Get URL details (owner only) | Yes |
-| DELETE | `/api/urls/{id}` | Delete URL | Yes |
-| GET | `/api/admin/users` | List all users | ADMIN |
-| PUT | `/api/admin/users/{id}/role` | Update user role | ADMIN |
-| POST | `/api/admin/email-invites/send` | Send email invitation | ADMIN |
-| GET | `/api/features` | Get features for your role | Yes (all users) |
-| GET | `/api/admin/features` | Get ADMIN role features | ADMIN |
-| GET | `/api/admin/features/all` | Get all features (USER + ADMIN) | ADMIN |
-| GET | `/api/admin/features/role/{role}` | Get features by role | ADMIN |
-| PUT | `/api/admin/features/{key}/toggle` | Toggle feature (set role optional) | ADMIN |
-| PUT | `/api/admin/features/{key}/enable` | Enable feature flag | ADMIN |
-| PUT | `/api/admin/features/{key}/disable` | Disable feature flag | ADMIN |
-| GET | `/api/health` | Health check | No |
-| GET | `/r/{shortCode}` | Redirect to original URL | No |
+The project uses a **three-stage image promotion pipeline** with approval gates:
+
+```mermaid
+graph LR
+    A[PR Merge to main] --> B[Build & Dev Deploy]
+    B --> C[Promote to Release]
+    C --> D[Deploy to Production]
+    
+    B -.->|auto| E[Dev Environment]
+    C -.->|gated: release env| F[Docker Hub: release tag]
+    D -.->|gated: production env| G[Prod Environment]
+```
+
+| Workflow | Trigger | Runner | Purpose |
+|----------|---------|--------|---------|
+| [PR Validation](.github/workflows/pr-validation.yml) | Pull request | `ubuntu-latest` | Build, test, Helm lint, template validation |
+| [Build and Dev Deploy](.github/workflows/build-and-dev-deploy.yml) | Push to main | Build: `ubuntu-latest` / Deploy: `[self-hosted, home-server]` | Detect changed services, build dev images, deploy to K3s dev |
+| [Promote to Release](.github/workflows/promote-to-release.yml) | Manual (gated) | `ubuntu-latest` | Tag dev images as release with approval from `release` environment |
+| [Deploy to Production](.github/workflows/deploy-to-production.yml) | Manual (gated) | `[self-hosted, home-server]` | Deploy release images to prod with approval from `production` environment |
+| [Rollback](.github/workflows/rollback.yml) | Manual | `[self-hosted, home-server]` | `helm rollback` with verification |
+| [Bootstrap Environment](.github/workflows/bootstrap-environment.yml) | Manual | `[self-hosted, home-server]` | Provision namespace, secrets, infra, deploy |
+
+### Image Promotion Flow
+
+| Stage | Image Tag Format | Registry | Trigger | Approval |
+|-------|-----------------|----------|---------|----------|
+| **Dev Build** | `{service}-dev-{short_sha}` | Docker Hub | PR merged to main | None (auto) |
+| **Release Promotion** | `{service}-release-{version}` | Docker Hub | Manual workflow | GitHub Environment: `release` |
+| **Production Deploy** | Uses release tag | Docker Hub (already there) | Manual workflow | GitHub Environment: `production` |
+
+**Key principle**: The same container image that runs in dev is promoted to production — no rebuild, no risk of build inconsistency.
+
+### Change Detection
+
+Only changed services are built and deployed. The [`build-and-dev-deploy.yml`](.github/workflows/build-and-dev-deploy.yml) workflow uses `git diff` to detect which services changed:
+
+- Changes to `identity-service/*` → only identity-service is built and deployed
+- Changes to `common/*`, `pom.xml`, or `Dockerfile` → all 8 services are built and deployed
+- Changes to `README.md`, `SETUP_GUIDE.md`, `docs/**` → no build triggered
+
+### State Files
+
+The pipeline uses Git-tracked state files to track image promotion status:
+
+| File | Purpose | Updated By |
+|------|---------|------------|
+| [`image-tags-dev.yaml`](image-tags-dev.yaml) | Latest dev image tags per service | `build-and-dev-deploy.yml` |
+| [`pending-releases.yaml`](pending-releases.yaml) | Services awaiting release promotion | `build-and-dev-deploy.yml` |
+| [`release-tags.yaml`](release-tags.yaml) | Released image tags with version | `promote-to-release.yml` |
+| [`prod-deployments.yaml`](prod-deployments.yaml) | Production deployment history | `deploy-to-production.yml` |
+
+The **self-hosted runner** on the home server connects **outbound** to GitHub via WebSocket — no inbound SSH or webhook ports needed. See [Home Server K3s Guide](docs/deployment/home-server-k3s.md) for setup.
 
 ---
 
-## 🚩 Feature Flags - Role-Based Management
+## Security Architecture
 
-### Overview
+The system uses **RS256 (Asymmetric)** JWTs for secure, stateless authentication.
 
-Feature flags are organized into a **normalized schema** with separate tables:
-- **Features Table**: Master feature definitions (10 features)
-- **Feature Flags Table**: Role-based enabled status (16 flags - 8 per role)
-- **Global Flags Table**: Features not tied to roles (2 flags - GLOBAL_USER_SIGNUP, GLOBAL_APP_NAME)
+1. **Token Issuance**: `identity-service` generates a key pair and signs JWTs using the **Private Key**.
+2. **Public Key Distribution**: `identity-service` exposes a `/.well-known/jwks.json` endpoint containing the **Public Key**.
+3. **Token Validation**: `api-gateway` fetches the public key from the JWKS endpoint and validates incoming tokens without calling the Identity Service for every request.
 
-ADMIN users can manage features for both USER and ADMIN roles independently.
+### JWT Claims & Zero-Trust Passthrough ✅ (Implemented)
 
-### Quick Reference
+JWT tokens carry enriched claims (`userId`, `username`, `roles`, `tokenVersion`) enabling each service to independently identify the authenticated user without trusting gateway-set headers. This follows **Pattern B: JWT Passthrough (Zero-Trust)** — every service validates the JWT against the JWKS endpoint and extracts user context directly from the claims.
 
-**Features (11 total):**
-1. `GLOBAL_USER_SIGNUP` - User Sign Up (GLOBAL)
-2. `GLOBAL_APP_NAME` - App Name (GLOBAL)
-3. `TWO_FACTOR_AUTH` - Two-Factor Authentication (GLOBAL, enabled by default)
-4. `PROFILE_PAGE` - Profile Page
-5. `EXPORT_JSON` - Export to JSON
-6. `URL_SHORTENING` - URL Shortening
-7. `DASHBOARD` - Dashboard
-8. `SETTINGS_PAGE` - Settings Page
-9. `EMAIL_INVITE` - Email Invitations
-10. `USER_MANAGEMENT` - User Management
-11. `FEATURE_MANAGEMENT` - Feature Management
+See [`plans/jwt-claims-enrichment-plan.md`](plans/jwt-claims-enrichment-plan.md) for the full design, implementation phases, and verification checklist.
 
-**Total Records:**
-- Features: 11 rows
-- Feature Flags: 16 rows (8 features × 2 roles)
-- Global Flags: 3 rows (GLOBAL_USER_SIGNUP, GLOBAL_APP_NAME, TWO_FACTOR_AUTH)
-
-### API Endpoints
-
-#### Public (No Authentication)
-
-**GET `/api/features/global`**
-- Returns all global flags (e.g., GLOBAL_USER_SIGNUP status)
-- No authentication required
-
-#### Authenticated Users
-
-**GET `/api/features`**
-- Returns feature flags for the authenticated user's role
-- USER role → Returns 8 USER features
-- ADMIN role → Returns 8 ADMIN features
-
-#### ADMIN Only
-
-**Feature Flags Management:**
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/admin/features` | GET | Get ALL feature flags (both roles) |
-| `/api/admin/features/{id}` | GET | Get feature flag by ID |
-| `/api/admin/features` | POST | Create new feature with role flags |
-| `/api/admin/features/{id}/toggle` | PUT | Toggle feature flag on/off |
-| `/api/admin/features/{id}` | DELETE | Delete feature flag |
-
-**Global Flags Management:**
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/admin/features/global` | GET | Get all global flags |
-| `/api/admin/features/global/{id}` | GET | Get global flag by ID |
-| `/api/admin/features/global` | POST | Create new global flag |
-| `/api/admin/features/global/{id}/toggle` | PUT | Toggle global flag on/off |
-| `/api/admin/features/global/{id}` | DELETE | Delete global flag |
-
-**Self-Invitation:**
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/self-invite/send?email={email}&baseUrl={url}` | POST | Send self-invitation (requires GLOBAL_USER_SIGNUP enabled) |
-
-### Example Requests
-
-#### Get Your Role's Features
-```bash
-curl -X GET 'http://localhost:8080/api/features' \
-  -H 'Authorization: Bearer YOUR_JWT_TOKEN'
-```
-
-**Response (USER role):**
-```json
-{
-  "success": true,
-  "message": "Features for USER role retrieved successfully",
-  "data": {
-    "features": [...],
-    "count": 8,
-    "role": "USER"
-  }
-}
-```
-
-#### Get Global Flags (Public - No Auth)
-```bash
-curl -X GET 'http://localhost:8080/api/features/global'
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Global flags retrieved successfully",
-  "data": {
-    "flags": [
-      {
-        "id": 1,
-        "featureKey": "GLOBAL_USER_SIGNUP",
-        "featureName": "User Sign Up",
-        "enabled": true
-      },
-      {
-        "id": 2,
-        "featureKey": "GLOBAL_APP_NAME",
-        "featureName": "MyURL",
-        "enabled": true
-      }
-    ],
-    "count": 2
-  }
-}
-```
-
-#### Create Feature Flag (ADMIN)
-```bash
-curl -X POST 'http://localhost:8080/api/admin/features' \
-  -H 'Authorization: Bearer ADMIN_TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d '{"featureKey":"NEW_FEATURE","featureName":"New Feature","description":"Feature description","adminEnabled":true,"userEnabled":true}'
-```
-
-**Request Body:**
-- `featureKey` (required): Unique key for the feature (e.g., `DASHBOARD`)
-- `featureName` (required): Display name for the feature
-- `description` (required): Description of what the feature does
-- `adminEnabled` (required): Whether the feature is enabled for ADMIN role
-- `userEnabled` (required): Whether the feature is enabled for USER role
-
-#### Create Global Flag (ADMIN)
-```bash
-curl -X POST 'http://localhost:8080/api/admin/features/global' \
-  -H 'Authorization: Bearer ADMIN_TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d '{"featureKey":"APP_NAME","featureName":"App Name","description":"Application display name","enabled":true}'
-```
-
-**Request Body:**
-- `featureKey` (required): Unique key for the feature
-- `featureName` (required): Display name for the feature
-- `description` (required): Description of the feature
-- `enabled` (required): Whether the global flag is enabled
-
-#### Toggle Feature Flag (ADMIN)
-```bash
-# Format 1: Object with enabled field
-curl -X PUT 'http://localhost:8080/api/admin/features/1/toggle' \
-  -H 'Authorization: Bearer ADMIN_TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d '{"enabled": false}'
-
-# Format 2: Simple boolean
-curl -X PUT 'http://localhost:8080/api/admin/features/1/toggle' \
-  -H 'Authorization: Bearer ADMIN_TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d 'true'
-```
-
-#### Delete Feature Flag (ADMIN)
-```bash
-curl -X DELETE 'http://localhost:8080/api/admin/features/1' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-```
-
-### Access Control
-
-| Endpoint | USER Role | ADMIN Role |
-|----------|-----------|------------|
-| GET `/api/features/global` | ✅ Public (no auth) | ✅ Public (no auth) |
-| GET `/api/features` | ✅ See USER features | ✅ See ADMIN features |
-| GET `/api/admin/features` | ❌ | ✅ Get ALL flags |
-| POST `/api/admin/features` | ❌ | ✅ Create flag |
-| PUT `/api/admin/features/{id}/toggle` | ❌ | ✅ Toggle flag |
-| DELETE `/api/admin/features/{id}` | ❌ | ✅ Delete flag |
-| GET/POST/PUT/DELETE `/api/admin/features/global/**` | ❌ | ✅ Manage global flags |
-```
-Returns features for the specified role.
-
-#### Toggle Feature (ADMIN Only)
-```bash
-PUT /api/admin/features/{key}/toggle
-Authorization: Bearer <ADMIN_JWT_TOKEN>
-Content-Type: application/json
-
-{
-  "enabled": true,
-  "targetRole": "USER"
-}
-```
-
-**Request Body:**
-- `enabled` (required): Boolean to enable/disable the feature
-- `targetRole` (optional): "USER" or "ADMIN" - changes which role the feature applies to
-
-### Access Control
-
-| Endpoint | USER Role | ADMIN Role |
-|----------|-----------|------------|
-| `GET /api/features` | ✅ See USER features | ✅ See ADMIN features |
-| `GET /api/admin/features/all` | ❌ | ✅ See all features |
-| `GET /api/admin/features` | ❌ | ✅ See ADMIN features |
-| `GET /api/admin/features/role/{role}` | ❌ | ✅ Get specific role |
-| `PUT /api/admin/features/{key}/toggle` | ❌ | ✅ Toggle any role's features |
-
-## 📧 Email Invitation Signup Flow
-
-### Overview
-
-The application supports an email invitation system where admins can invite users to register. The flow works as follows:
-
-1. **Admin sends invitation** via `POST /api/admin/email-invites/send`
-2. **User receives email** with signup link containing invitation token
-3. **User clicks link** and is redirected to signup page with token
-4. **Frontend validates token** using `/api/auth/verify-email` (optional, for better UX)
-5. **User fills signup form** (token included in request)
-6. **Backend validates token** and creates account
-7. **Email marked as verified** (no verification needed - admin invite proves ownership)
-8. **Invitation marked as accepted**
-9. **Congratulations email sent**
-10. **User can login immediately**
-
-### Step-by-Step Flow
-
-#### 1. Admin Sends Invitation
-
-```bash
-curl -X POST 'http://localhost:8080/api/admin/email-invites/send?email=user@example.com&baseUrl=http://localhost:8080' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Invitation sent to: user@example.com"
-}
-```
-
-#### 2. User Receives Email
-
-The email contains a signup link:
-```
-http://localhost:8080/signup?invite=aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5zA7bC9dE1fG3hI5jK7lM9nO1pQ
-```
-
-#### 3. Frontend Validates Token (Optional)
-
-Before showing the signup form, validate the token:
-
-```bash
-curl -X GET 'http://localhost:8080/api/auth/verify-email-invite?token=aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5zA7bC9dE1fG3hI5jK7lM9nO1pQ'
-```
-
-**Response (Valid Token):**
-```json
-{
-  "success": true,
-  "message": "Invitation token is valid"
-}
-```
-
-**Response (Invalid Token):**
-```json
-{
-  "success": false,
-  "message": "Invalid or expired invitation token: This invite has expired"
-}
-```
-
-#### 4. User Signs Up with Token
-
-```bash
-curl -X POST 'http://localhost:8080/api/auth/signup' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "firstName": "John",
-    "lastName": "Doe",
-    "username": "johndoe",
-    "password": "MySecure@Pass123",
-    "invitationToken": "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5zA7bC9dE1fG3hI5jK7lM9nO1pQ"
-  }'
-```
-
-**Note:** Email is NOT required in the request - it's extracted from the invitation token.
-
-**Password Requirements:**
-- Minimum 8 characters
-
-**Response (Success):**
-```json
-{
-  "success": true,
-  "message": "Successfully registered!"
-}
-```
-
-**What Happens After Signup:**
-1. ✅ User account created with provided password
-2. ✅ Email marked as verified (no verification email needed)
-3. 🎉 Congratulations email sent: "Congratulations {firstName} 🎊, you are successfully registered"
-4. 📝 Invitation marked as ACCEPTED
-5. 🔑 User can login immediately (no email verification required)
-
-**Response (Invalid Token):**
-```json
-{
-  "success": false,
-  "message": "Invalid or expired invitation token: This invite has expired"
-}
-```
-
-#### 5. User Logs In
-
-Since email is already verified via the admin invite, the user can login immediately:
-
-```bash
-curl -X POST 'http://localhost:8080/api/auth/login' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "username": "johndoe",
-    "password": "MySecure@Pass123"
-  }'
-```
-
-#### 6. Invitation Status Updated
-
-After successful registration, the invitation status is automatically changed from `PENDING` to `ACCEPTED`.
-
-### Token Validation Rules
-
-| Condition | Error Message |
-|-----------|--------------|
-| Token doesn't exist | `Invalid invite token` |
-| Token expired (>7 days) | `This invite has expired` |
-| Token revoked by admin | `This invite has been revoked` |
-| Token already used | `This invite has already been used` |
-
-### Key Differences from Regular Signup
-
-| Feature | Regular Signup | Invitation Signup |
-|---------|---------------|-------------------|
-| Email verification | Required | ❌ Not required (already verified via invite) |
-| Verification email | Sent | ❌ Not sent |
-| Congratulations email | Sent | ✅ Sent |
-| Can login immediately | ❌ No (must verify first) | ✅ Yes |
-| Email in request | Required | ❌ Not required (from token) |
-| Invitation token | Not required | ✅ Required |
-
-### Signup Validation Rules (NIST SP 800-63B)
-
-All signup requests (invitation-based or otherwise) enforce these validation rules:
-
-| Field | Rule | Valid Examples | Invalid Examples |
-|-------|------|---------------|-----------------|
-| **firstName** | 1-100 chars, letters + spaces + hyphens + apostrophes | `"John"`, `"José"`, `"Jean-Luc"`, `"O'Brien"` | `"John123"`, `"J@hn"`, `""` |
-| **lastName** | Same as firstName | `"Doe"`, `"van der Berg"` | `"Doe!"`, `"123"` |
-| **username** | 3-50 chars, starts with letter, `[a-zA-Z0-9_]` | `"johndoe"`, `"user_123"`, `"abc"` | `"1user"`, `"a-b"`, `"ab"`, `"_user"` |
-| **password** | Min 8 chars, no complexity requirements | `"MyStr0ng!Pass"`, `"correct horse battery"` | `"short"`, `"password"`, `"123456"` |
-| **password** | Must not be a common/breached password | `"Xk9#mP2$vL"` | `"password123"`, `"qwerty"`, `"admin"` |
-| **password** | Must not contain username | `"Str0ng!Pass"` (user: `johndoe`) | `"johndoe123"` (user: `johndoe`) |
-| **username** | Reserved words rejected | `"developer_john"`, `"user_42"` | `"admin"`, `"root"`, `"system"`, `"api"` |
-
-**Why NIST-compliant?** NIST SP 800-63B removed complexity requirements because they force predictable patterns (like `Password1!`). Length + breach-list checking is more effective than mandatory special chars.
+Secrets are managed via Kubernetes Secrets — never stored in values files or committed to the repository. CI/CD workflows inject secrets at deploy time from GitHub Environment secrets.
 
 ---
 
-### Pagination
+## Observability
 
-Multiple endpoints support pagination to improve performance:
-
-#### 1. GET /api/urls - User's URLs
-
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | int | 0 | Page number (0-indexed) |
-| `size` | int | 10 | Number of items per page |
-| `sortBy` | string | createdAt | Sort field: `id`, `originalUrl`, `shortCode`, `accessCount`, `createdAt` |
-| `sortDirection` | string | desc | Sort direction: `asc` or `desc` |
-
-**Example Requests:**
-```bash
-# Get first page (10 items, sorted by createdAt desc)
-curl -X GET 'http://localhost:8080/api/urls' \
-  -H 'Authorization: Bearer YOUR_TOKEN'
-
-# Get second page with 20 items
-curl -X GET 'http://localhost:8080/api/urls?page=1&size=20' \
-  -H 'Authorization: Bearer YOUR_TOKEN'
-
-# Sort by most accessed URLs
-curl -X GET 'http://localhost:8080/api/urls?sortBy=accessCount&sortDirection=desc' \
-  -H 'Authorization: Bearer YOUR_TOKEN'
-```
-
-**Response Format:**
-```json
-{
-  "success": true,
-  "message": "URLs retrieved successfully",
-  "data": {
-    "pagination": {
-      "content": [...],
-      "page": 0,
-      "size": 10,
-      "totalElements": 150,
-      "totalPages": 15,
-      "first": true,
-      "last": false,
-      "sortBy": "createdAt",
-      "sortDirection": "desc"
-    },
-    "summary": {
-      "totalUrls": 150
-    }
-  }
-}
-```
-
-#### 2. GET /api/admin/users - All Users (Admin)
-
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | int | 0 | Page number (0-indexed) |
-| `size` | int | 20 | Number of users per page |
-| `status` | string | - | Filter by status: `ACTIVE`, `SUSPENDED`, `DELETED` |
-| `search` | string | - | Search by username, email, firstName, or lastName (partial match) |
-| `sortBy` | string | createdAt | Sort field: `id`, `firstName`, `lastName`, `email`, `username`, `createdAt`, `lastLogin`, `status` |
-| `sortDirection` | string | desc | Sort direction: `asc` or `desc` |
-
-**Example Requests:**
-```bash
-# Get all users with default pagination
-curl -X GET 'http://localhost:8080/api/admin/users' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Get active users, page 1, sorted by email
-curl -X GET 'http://localhost:8080/api/admin/users?status=ACTIVE&page=1&size=10&sortBy=email&sortDirection=asc' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Sort users by last login (most recent first)
-curl -X GET 'http://localhost:8080/api/admin/users?sortBy=lastLogin&sortDirection=desc' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Search users by email (contains "gmail")
-curl -X GET 'http://localhost:8080/api/admin/users?search=gmail' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Search for users named "john" (matches firstName, lastName, username, or email)
-curl -X GET 'http://localhost:8080/api/admin/users?search=john' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Search active users by email domain
-curl -X GET 'http://localhost:8080/api/admin/users?status=ACTIVE&search=@company.com' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-```
-
-**Response Format:**
-```json
-{
-  "success": true,
-  "message": "Users retrieved",
-  "data": {
-    "pagination": {
-      "content": [...],
-      "page": 0,
-      "size": 20,
-      "totalElements": 100,
-      "totalPages": 5,
-      "first": true,
-      "last": false,
-      "sortBy": "createdAt",
-      "sortDirection": "desc"
-    },
-    "summary": {
-      "totalUsers": 100,
-      "activeUsers": 80,
-      "suspendedUsers": 10,
-      "deletedUsers": 10
-    }
-  }
-}
-```
-
-#### 3. GET /api/admin/email-invites - Email Invitations (Admin)
-
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | int | 0 | Page number (0-indexed) |
-| `size` | int | 20 | Number of invites per page |
-| `search` | string | - | Search by email address (partial match, case-insensitive) |
-| `sortBy` | string | createdAt | Sort field: `id`, `email`, `status`, `createdAt`, `expiresAt`, `invitedByUsername` |
-| `sortDirection` | string | desc | Sort direction: `asc` or `desc` |
-
-**Example Requests:**
-```bash
-# Get all invites with default pagination
-curl -X GET 'http://localhost:8080/api/admin/email-invites' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Get invites sorted by email
-curl -X GET 'http://localhost:8080/api/admin/email-invites?sortBy=email&sortDirection=asc' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Get second page with 50 invites per page
-curl -X GET 'http://localhost:8080/api/admin/email-invites?page=1&size=50' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Search invites by email domain
-curl -X GET 'http://localhost:8080/api/admin/email-invites?search=@gmail.com' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-
-# Search invites by partial email
-curl -X GET 'http://localhost:8080/api/admin/email-invites?search=john' \
-  -H 'Authorization: Bearer ADMIN_TOKEN'
-```
-
-**Response Format:**
-```json
-{
-  "success": true,
-  "message": "Invites retrieved",
-  "data": {
-    "pagination": {
-      "content": [...],
-      "page": 0,
-      "size": 20,
-      "totalElements": 50,
-      "totalPages": 3,
-      "first": true,
-      "last": false,
-      "sortBy": "createdAt",
-      "sortDirection": "desc"
-    },
-    "summary": {
-      "totalInvites": 50,
-      "pendingInvites": 30,
-      "acceptedInvites": 15,
-      "revokedInvites": 5
-    }
-  }
-}
-```
-
-### Common Pagination Response Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `content` | array | List of items for the current page |
-| `page` | int | Current page number (0-indexed) |
-| `size` | int | Number of items per page |
-| `totalElements` | long | Total number of items across all pages |
-| `totalPages` | int | Total number of pages |
-| `first` | boolean | Whether this is the first page |
-| `last` | boolean | Whether this is the last page |
-| `sortBy` | string | Field used for sorting |
-| `sortDirection` | string | Sort direction (`asc` or `desc`) |
-
-### Swagger/OpenAPI Documentation
-
-**⚠️ Development mode only** (disabled in production):
-- `/swagger-ui.html` - Interactive Swagger UI (for API testing)
-- `/v3/api-docs` - OpenAPI 3.0 JSON specification
-
-**Using Swagger UI:**
-1. Navigate to `http://localhost:8080/swagger-ui.html`
-2. Click **Authorize**
-3. Enter credentials (set in `scripts/init-db.sql`)
-4. Use **Try it out** to test API endpoints
+- **Distributed Tracing**: Integrated via **OpenTelemetry**. Every request is tracked across services using a unique Trace ID.
+- **Metrics**: Exposed via **Prometheus** endpoints (`/actuator/prometheus`) in every service.
+- **Dashboards**: Grafana dashboards in `deploy/monitoring/dashboards/`.
 
 ---
 
-## 👥 Users
+## API Reference (via Gateway)
 
-### Admin Credentials
+All requests should be sent to the **API Gateway** (default port `8080`).
 
-See the **🔑 Admin Credentials Setup** section above for step-by-step instructions on configuring your admin user.
+### Public Endpoints
+- `GET /r/{code}` → Redirects to original URL (handled by Redirect Service)
+- `POST /api/auth/signup` → User registration
+- `POST /api/auth/login` → Authentication (password + OTP via Redis)
+- `POST /api/auth/verify-otp` → Verify OTP and receive JWT
+- `POST /api/auth/resend-otp` → Resend OTP (30s cooldown)
+- `GET /api/features/global` → Get global feature flags
 
-> **Quick reference:**
-> 1. Generate a BCrypt hash for your password
-> 2. Edit `scripts/init-db.sql` with your credentials
-> 3. Run the init script against your MySQL database
-> 4. Login with the credentials you configured
+### Authenticated Endpoints
+- `POST /api/urls` → Create short URL
+- `GET /api/urls` → List user's URLs
+- `DELETE /api/urls/{id}` → Delete a URL
+- `PUT /api/users/profile` → Update profile
 
-### Reset Admin Password
-
-Use the provided script to generate a BCrypt hash and update the database:
-
-```bash
-# Install dependency (one-time)
-pip3 install bcrypt
-
-# Reset password (interactive)
-./scripts/reset-admin-password.sh
-
-# Or pass password directly
-./scripts/reset-admin-password.sh "MyNewSecure@Pass123"
-```
-
-**Requirements:**
-- Docker MySQL container (`mysql_db_miniurl`)
-- Python3 with `bcrypt` module
-
-### User Roles
-
-| Role | Permissions |
-|------|-------------|
-| **ADMIN** | Full access, user management, all features |
-| **USER** | Create/manage own URLs, profile, settings |
-
-### User Status
-
-| Status | Description |
-|--------|-------------|
-| **ACTIVE** | User can log in |
-| **SUSPENDED** | Account temporarily disabled |
-| **DELETED** | Soft-deleted (can be reactivated) |
+### Admin Endpoints
+- `POST /api/admin/invites` → Send email invitation
+- `GET /api/admin/users` → Manage all users
+- `POST /api/admin/features` → Manage feature flags
 
 ---
 
-## 🗃️ Database Schema
+## Project Structure
 
-### Users Table
-| Column | Type | Constraints |
-|--------|------|-------------|
-| id | BIGINT | PRIMARY KEY |
-| first_name | VARCHAR(100) | NOT NULL |
-| last_name | VARCHAR(100) | NOT NULL |
-| email | VARCHAR(255) | UNIQUE |
-| username | VARCHAR(255) | UNIQUE |
-| password | VARCHAR(255) | BCrypt hash |
-| role_id | BIGINT | FK → roles |
-| status | VARCHAR(20) | ACTIVE/SUSPENDED/DELETED |
-| created_at | DATETIME | NOT NULL |
-
-### URLs Table
-| Column | Type | Constraints |
-|--------|------|-------------|
-| id | BIGINT | PRIMARY KEY |
-| original_url | VARCHAR(2048) | NOT NULL |
-| short_code | VARCHAR(10) | UNIQUE |
-| user_id | BIGINT | FK → users |
-| access_count | BIGINT | DEFAULT 0 |
-| created_at | DATETIME | NOT NULL |
-
-### Other Tables
-- **roles** - User roles (ADMIN, USER)
-- **verification_tokens** - Email verification and password reset tokens
-- **audit_logs** - System audit trail
-- **email_invites** - Email invitation tracking
-- **feature_flags** - Feature toggle configuration
-- **url_usage_limits** - Per-user URL usage tracking
-
----
-
-## 🏗️ Architecture
-
-### Resilience Patterns (Resilience4j)
-
-**Circuit Breakers:**
-- `database` - 60% failure rate, 20s wait
-- `emailService` - 50% failure rate, 60s wait
-- `urlValidation` - 70% failure rate, 15s wait
-
-**Bulkheads (Thread Pool Isolation):**
-| Bulkhead | Max Concurrent | Purpose |
-|----------|---------------|---------|
-| `urlCreation` | 50 | URL shortening |
-| `email` | 20 | Email sending |
-| `admin` | 30 | Admin operations |
-| `redirect` | 200 | High-throughput redirects |
-
-**Retry with Exponential Backoff:**
-- Database: 3 attempts, 500ms base
-- Email: 3 attempts, 2s base
-- URL validation: 2 attempts, 500ms base
-
-### Two-Factor Authentication (2FA)
-
-Login supports optional two-factor authentication controlled by the `TWO_FACTOR_AUTH` global feature flag. When enabled, users must verify a 6-digit OTP sent to their email after entering valid credentials.
-
-**2FA Login Flow:**
-
-```
-1. POST /api/auth/login {"username":"suri","password":"****"}
-   → If 2FA disabled: Returns JWT token directly
-   → If 2FA enabled: Returns OTP pending response
-
-2a. POST /api/auth/verify-otp {"username":"suri","otp":"482156"}
-   → Returns JWT token after successful OTP verification
-
-2b. POST /api/auth/resend-otp {"username":"suri"}
-   → Resends same OTP if still valid, or generates new one if expired
-   → Then use verify-otp to complete login
-```
-
-**Login Response (2FA Enabled):**
-```json
-{
-  "success": true,
-  "message": "OTP sent to your email",
-  "data": {
-    "otpRequired": true,
-    "email": "s***b@gmail.com"
-  }
-}
-```
-
-**Verify OTP Response:**
-```json
-{
-  "success": true,
-  "message": "Login successful",
-  "data": {
-    "token": "eyJhbGciOiJIUzUxMiJ9...",
-    "username": "suri",
-    "userId": 1,
-    "firstName": "John",
-    "lastName": "Doe"
-  }
-}
-```
-
-**Toggle 2FA:**
-```sql
--- Disable 2FA
-UPDATE global_flags gf
-JOIN features f ON gf.feature_id = f.id
-SET gf.enabled = false
-WHERE f.feature_key = 'TWO_FACTOR_AUTH';
-
--- Enable 2FA
-UPDATE global_flags gf
-JOIN features f ON gf.feature_id = f.id
-SET gf.enabled = true
-WHERE f.feature_key = 'TWO_FACTOR_AUTH';
-```
-
-**Resend OTP Behavior:**
-- If the existing OTP is still **valid** (not expired): the **same OTP is resent** — your original code still works
-- If the existing OTP is **expired**: a **new OTP is generated**
-- **30-second cooldown** between consecutive OTP sends (applies to both login and resend-otp)
-- Repeated calls to `POST /api/auth/login` within 30s return: *"OTP already sent. Please wait 30 seconds before trying again."*
-
-**Key Design Notes:**
-- The `username` field in verify-otp and resend-otp accepts either the username **or** email — use the same identifier you used during login
-- The masked email in the login response (`s***b@gmail.com`) is for display only — the UI shows it to the user but uses their original login input for verification
-- OTP expires after 10 minutes (configurable via `app.otp.expiry-minutes`)
-
-### Rate Limiting (Bucket4j + Caffeine)
-
-Login endpoints use **dual-layer** rate limiting (per-IP + per-username) to protect against brute-force attacks while allowing users behind shared NATs/corporate networks to login normally. Password reset and OTP endpoints also have dual-layer (per-IP + per-email) protection.
-
-| Endpoint | Per-IP Limit | Per-User Limit | Purpose |
-|----------|-------------|---------------|---------|
-| Login | 100 req / 15 min | 5 req / 5 min (username) | Brute force protection (works for non-existent users) |
-| Password Reset | 60 req / 1 hr | 1 req / 20 min (email) | Prevents targeting specific accounts |
-| OTP Verify/Resend | 30 req / 15 min | 5 req / 5 min (email/username) | Brute-force protection per user |
-| Signup | 20 req / 1 hr | — | Spam prevention |
-| Email Verification | 50 req / 1 hr | — | Token validation abuse prevention |
-| URL Creation | 500 req / 1 hr | — | Fair usage |
-| General API | 1000 req / 1 hr | — | API abuse prevention |
-| Redirects | 5000 req / 1 hr | — | DDoS protection |
-
-**Rate Limit Responses (HTTP 429):**
-
-When a rate limit is exceeded, the API returns a `429 Too Many Requests` response with the exact cooldown time:
-
-```json
-{
-  "success": false,
-  "message": "Rate limit exceeded. Please try again in 298 seconds."
-}
-```
-
-**Headers included:**
-- `Retry-After`: Seconds until the rate limit resets
-- `X-RateLimit-Limit`: Maximum requests allowed
-- `X-RateLimit-Remaining`: Remaining requests (always `0` when rate limited)
-
-**How dual-layer login protection works:**
-```
-POST /api/auth/login {"username":"xyz","password":"wrong"}
-  ├─ Per-IP bucket:    100 requests per 15 minutes  (shared NAT friendly)
-  └─ Per-username bucket: 5 requests per 5 minutes  (brute-force protection, works for non-existent users)
-```
-
-**Environment variable overrides (production):**
-```bash
-APP_RATE_LIMIT_LOGIN_REQUESTS=100          # Per-IP login limit
-APP_RATE_LIMIT_LOGIN_SECONDS=900
-APP_RATE_LIMIT_LOGIN_BY_USERNAME_REQUESTS=5  # Per-username login limit
-APP_RATE_LIMIT_LOGIN_BY_USERNAME_SECONDS=300
-```
-
-### Security Architecture
-
-```
-Request → Rate Limit → CORS Validation → JWT Filter → Circuit Breaker → Bulkhead → Retry → Business Logic
-```
-
-**Password Requirements:**
-- Minimum 12 characters
-- Uppercase, lowercase, number, special character
-- No common passwords
-- No sequential characters (123, abc)
-
----
-
-## 📁 Project Structure
-
-```
-miniurl/
-├── docker-compose.yml           # API container only
-├── docker-compose-mysql.yml     # MySQL container (separate stack)
-├── docker-compose-nginx.yml     # Nginx reverse proxy (optional)
-├── nginx.conf                   # Nginx routing config
+```text
+.
+├── common/                     # Shared DTOs, Exceptions, and Utils
+├── api-gateway/                # Spring Cloud Gateway (Routing, Security, Rate Limiting)
+├── eureka-server/              # Service Discovery
+├── identity-service/           # Auth, User Management, JWKS, Redis-backed OTP
+├── url-service/                # URL Management, Snowflake ID Generation
+├── redirect-service/           # Reactive Redirect Path (High Throughput)
+├── feature-service/            # Feature Flag Management
+├── notification-service/       # Async Email Worker (Kafka Consumer)
+├── analytics-service/          # Click Tracking Worker (Kafka Consumer)
+├── helm/miniurl/               # Helm Chart (single source of truth for K8s)
+├── .github/workflows/          # CI/CD Pipelines (6 workflows)
 ├── scripts/
-│   ├── init-db.sql              # Database initialization (single source of truth)
-│   ├── init-db.sh               # Database setup script
-│   └── reset-admin-password.sh  # Reset admin password
-├── src/main/java/com/miniurl/
-│   ├── config/                  # Security, JWT, CORS, Rate limiting
-│   ├── controller/              # REST controllers (API only)
-│   ├── service/                 # Business logic services
-│   ├── entity/                  # JPA entities
-│   ├── repository/              # Spring Data JPA repositories
-│   ├── dto/                     # Data Transfer Objects
-│   ├── exception/               # Custom exceptions
-│   └── util/                    # Utilities (JwtUtil, etc.)
-├── src/main/resources/
-│   ├── application.yml          # Application configuration
-│   ├── logback-spring.xml       # Logging configuration
-│   └── templates/
-│       └── email/               # Thymeleaf email templates (minimal UI)
-│           ├── otp-email.html
-│           ├── email-verification.html
-│           ├── password-reset.html
-│           ├── welcome-email.html
-│           ├── welcome-back-email.html
-│           ├── account-deletion.html
-│           ├── password-reset-confirmation.html
-│           ├── password-change-notification.html
-│           ├── invite-email.html
-│           └── registration-congratulations.html
-├── src/test/java/com/miniurl/
-│   ├── integration/             # API integration tests
-│   ├── service/                 # Service unit tests
-│   └── entity/                  # Entity unit tests
-├── .github/workflows/
-│   ├── ci.yml                   # CI pipeline
-│   ├── docker-publish.yml       # Docker build on release tags
-│   └── version-bump.yml         # Auto version bump on PR merge
-├── .qwen/skill.md               # Qwen Code skill guide
-├── pom.xml
-├── Dockerfile
-└── docker-compose.yml
+│   ├── local/                  # Minikube dev scripts
+│   └── deploy/                 # Deployment & smoke-test scripts
+├── docs/
+│   ├── deployment/             # Home server K3s, CI/CD, bootstrap guides
+│   └── development/            # Local Minikube guide
+├── k8s/                        # Infrastructure manifests (Prometheus, Grafana) + deprecated
+├── terraform/                  # Infrastructure as Code
+├── image-tags-dev.yaml         # Dev image tags (auto-updated by CI)
+├── pending-releases.yaml       # Pending release promotions (auto-updated)
+├── release-tags.yaml           # Released image tags (promoted from dev)
+├── prod-deployments.yaml       # Production deployment history
+└── docker-compose.yml          # Local Development Environment
 ```
 
----
-
-## 🔧 Configuration
-
-### Environment Variables
-
-**Required:**
-```bash
-APP_JWT_SECRET=<min-32-characters>
-SPRING_DATASOURCE_URL=jdbc:mysql://host:3306/miniurldb
-SPRING_DATASOURCE_USERNAME=root
-SPRING_DATASOURCE_PASSWORD=<password>
-APP_CORS_ALLOWED_ORIGINS=http://localhost:8080
-```
-
-**Optional:**
-```bash
-APP_NAME=MyURL
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=<email>
-SMTP_PASSWORD=<password>
-APP_BASE_URL=http://localhost:8080
-```
-
-See `.env.example` for full list and descriptions.
-
-### HikariCP Connection Pool
-
-| Property | Dev | Prod |
-|----------|-----|------|
-| `minimum-idle` | 5 | 10 |
-| `maximum-pool-size` | 20 | 50 |
-| `connection-timeout` | 30000ms | 30000ms |
-| `leak-detection-threshold` | 60000ms | 30000ms |
-
----
-
-## 🧪 Testing
-
-```bash
-# Unit tests
-mvn test
-
-# Integration tests
-mvn verify -Pintegration-tests
-
-# With coverage
-mvn test jacoco:report
-
-# View coverage
-open target/site/jacoco/index.html
-```
-
-**Test Coverage:** 80% minimum (enforced by JaCoCo)
-
----
-
-## 🔄 CI/CD
-
-### GitHub Actions
-
-**Workflows:**
-1. **CI Pipeline** (`ci.yml`) - Build, test, health check on PRs
-2. **Docker Publish** (`docker-publish.yml`) - Build and push image on push to `main` or release tags
-3. **Version Bump** (`version-bump.yml`) - Auto minor version bump on PR merge
-
-### Docker Publishing
-
-- **Push to `main`** — publishes `gallantsuri1/miniurl-api:v1.0.0`
-- **Release tag** (e.g., `v1.0.0`) — publishes versioned tags: `v1.0.0`, `1.0`, `sha-<hash>`
-
-**Trigger a release:**
-```bash
-git tag v1.0.0 && git push origin v1.0.0
-```
-
-**Required secrets** (GitHub repo → Settings → Secrets → Actions):
-- `DOCKERHUB_USERNAME` — your Docker Hub username
-- `DOCKERHUB_TOKEN` — a Docker Hub access token
-
-**Manage images:**
-- View: [Docker Hub](https://hub.docker.com/r/gallantsuri1/miniurl-api)
-- Use: Set `DOCKER_IMAGE` in `.env` to pick a specific tag
-
----
-
-## 🛡️ Git Workflow
-
-### Branch Protection
-
-- **main/master**: Protected branches
-- **All changes require PR** with code owner review
-
-### Version Bumping
-
-- **Automatic** on PR merge to main/master
-- **Minor version bump**: `1.0.0` → `1.1.0`
-- Creates draft GitHub release with version tag
-
----
-
-## 📧 Email Invitations
-
-**Admin-only feature** to invite users via email API:
-
-**Features:**
-- Search & filter by status
-- Resend revoked/expired invites
-- Smart validation (no duplicate active invites)
-- Status tracking: PENDING, ACCEPTED, EXPIRED, REVOKED
-
----
-
-## 🛠️ Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| **Backend** | Java 17, Spring Boot 3.2 |
-| **Security** | Spring Security, JWT, BCrypt |
-| **Database** | MySQL 8.0, H2 (testing) |
-| **ORM** | Spring Data JPA, Hibernate |
-| **Rate Limiting** | Bucket4j, Caffeine |
-| **Resilience** | Resilience4j |
-| **Testing** | JUnit 5, Mockito |
-| **Coverage** | JaCoCo (80% threshold) |
-| **CI/CD** | GitHub Actions |
-| **Container** | Docker, Docker Compose |
-
----
-
-## 📝 Logging
-
-**Configuration:** `src/main/resources/logback-spring.xml`
-
-| Property | Default |
-|----------|---------|
-| **Log Directory** | `./logs` |
-| **Max File Size** | 10MB |
-| **Retention** | 30 days |
-| **Total Size Cap** | 1GB |
-
-**View logs:**
-```bash
-ls -la logs/
-less logs/miniurl.*.log
-tail -f logs/miniurl.log
-```
-
----
-
-## 📄 License
-
-MIT License
-
-## 🔌 Frontend Integration Guide
-
-### Email Invitation Signup Flow Implementation
-
-This guide explains how to integrate the email invitation signup flow with your frontend application.
-
-#### 1. Extract Token from URL
-
-When a user clicks the invitation link (`/signup?invite={token}`), extract the token:
-
-```javascript
-// React example using react-router-dom
-import { useSearchParams } from 'react-router-dom';
-
-function SignupPage() {
-  const [searchParams] = useSearchParams();
-  const invitationToken = searchParams.get('invite');
-  
-  // Store token in state for form submission
-  const [formData, setFormData] = useState({
-    firstName: '',
-    lastName: '',
-    email: '',
-    username: '',
-    password: '',
-    invitationToken: invitationToken || ''
-  });
-```
-
-#### 2. Display Signup Form
-
-Show the signup form with the token as a hidden field:
-
-```jsx
-<form onSubmit={handleSubmit}>
-  <input
-    type="text"
-    name="firstName"
-    value={formData.firstName}
-    onChange={handleChange}
-    placeholder="First Name"
-    required
-  />
-  
-  <input
-    type="text"
-    name="lastName"
-    value={formData.lastName}
-    onChange={handleChange}
-    placeholder="Last Name"
-    required
-  />
-  
-  <input
-    type="email"
-    name="email"
-    value={formData.email}
-    onChange={handleChange}
-    placeholder="Email"
-    required
-  />
-  
-  <input
-    type="text"
-    name="username"
-    value={formData.username}
-    onChange={handleChange}
-    placeholder="Username"
-    required
-  />
-  
-  <input
-    type="password"
-    name="password"
-    value={formData.password}
-    onChange={handleChange}
-    placeholder="Password (min 12 characters)"
-    required
-    minLength="12"
-  />
-  
-  {/* Hidden invitation token field */}
-  {formData.invitationToken && (
-    <input type="hidden" name="invitationToken" value={formData.invitationToken} />
-  )}
-  
-  <button type="submit">Sign Up</button>
-</form>
-```
-
-#### 3. Submit Signup Request
-
-**Important:** Your frontend must be served from a domain included in `APP_CORS_ALLOWED_ORIGINS`.
-
-```javascript
-async function handleSignup(formData) {
-  try {
-    const response = await fetch('http://localhost:8080/api/auth/signup', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        firstName: formData.firstName,
-        lastName: formData.lastName,
-        username: formData.username,
-        password: formData.password,
-        invitationToken: formData.invitationToken // Include token
-      })
-    });
-    
-    const data = await response.json();
-    
-    if (response.ok) {
-      // Success - show message
-      alert('Successfully registered! Please check your email to verify your account.');
-    } else {
-      // Handle errors
-      if (data.message.includes('invitation token')) {
-        alert('Invalid or expired invitation. Please contact the administrator.');
-      } else {
-        alert(data.message);
-      }
-    }
-  } catch (error) {
-    console.error('Signup error:', error);
-    alert('An error occurred. Please try again.');
-  }
-}
-```
-
-#### 4. Handle Token Validation Errors
-
-Display appropriate error messages based on the response:
-
-```javascript
-function displayError(message) {
-  const errorMessages = {
-    'Invalid invite token': 'This invitation link is invalid. Please check the URL or contact the administrator.',
-    'This invite has expired': 'This invitation has expired (valid for 7 days). Please request a new invitation.',
-    'This invite has been revoked': 'This invitation has been revoked. Please contact the administrator.',
-    'This invite has already been used': 'This invitation has already been used. Please check if you already have an account.',
-    'Email already registered': 'This email is already registered. Please login instead.'
-  };
-  
-  const userMessage = Object.keys(errorMessages).find(key => message.includes(key))
-    ? errorMessages[Object.keys(errorMessages).find(key => message.includes(key))]
-    : message;
-  
-  // Display userMessage to the user
-  setError(userMessage);
-}
-```
-
-#### 5. Complete Flow Example (React)
-
-```jsx
-import React, { useState } from 'react';
-import { useSearchParams, Navigate } from 'react-router-dom';
-
-function InvitationSignup() {
-  const [searchParams] = useSearchParams();
-  const invitationToken = searchParams.get('invite');
-  
-  const [formData, setFormData] = useState({
-    firstName: '',
-    lastName: '',
-    email: '',
-    username: '',
-    password: '',
-    invitationToken: invitationToken || ''
-  });
-  const [success, setSuccess] = useState(false);
-  const [loading, setLoading] = useState(false);
-  
-  const handleChange = (e) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value
-    });
-  };
-  
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-    
-    try {
-      const response = await fetch('http://localhost:8080/api/auth/signup', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          firstName: formData.firstName,
-          lastName: formData.lastName,
-          username: formData.username,
-          password: formData.password,
-          invitationToken: formData.invitationToken
-        })
-      });
-      
-      const data = await response.json();
-
-      if (response.ok) {
-        setSuccess(true);
-      } else {
-        displayError(data.message);
-      }
-    } catch (err) {
-      if (err.message.includes('Failed to fetch')) {
-        setError('CORS error: Ensure your frontend domain is in APP_CORS_ALLOWED_ORIGINS');
-      } else {
-        setError('An error occurred. Please try again.');
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-  
-  const displayError = (message) => {
-    const errorMessages = {
-      'Invalid invite token': 'This invitation link is invalid.',
-      'This invite has expired': 'This invitation has expired (7 days).',
-      'This invite has been revoked': 'This invitation has been revoked.',
-      'This invite has already been used': 'This invitation was already used.'
-    };
-    
-    const userMessage = Object.keys(errorMessages).find(key => message.includes(key))
-      ? errorMessages[Object.keys(errorMessages).find(key => message.includes(key))]
-      : message;
-    
-    setError(userMessage);
-  };
-  
-  if (success) {
-    return (
-      <div className="success-message">
-        <h2>🎉 Successfully Registered!</h2>
-        <p>Please check your email to verify your account.</p>
-      </div>
-    );
-  }
-  
-  return (
-    <div className="signup-container">
-      <h2>Complete Your Registration</h2>
-      {invitationToken && (
-        <p className="invite-notice">You're signing up with an invitation!</p>
-      )}
-      
-      {error && <div className="error-message">{error}</div>}
-      
-      <form onSubmit={handleSubmit}>
-        {/* Form fields... */}
-        <button type="submit" disabled={loading}>
-          {loading ? 'Signing up...' : 'Sign Up'}
-        </button>
-      </form>
-    </div>
-  );
-}
-
-export default InvitationSignup;
-```
-
-#### 6. CSS Styling Suggestions
-
-```css
-.invite-notice {
-  background-color: #e3f2fd;
-  border-left: 4px solid #2196f3;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  border-radius: 4px;
-}
-
-.error-message {
-  background-color: #ffebee;
-  border-left: 4px solid #f44336;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  border-radius: 4px;
-  color: #c62828;
-}
-
-.success-message {
-  text-align: center;
-  padding: 40px;
-  background-color: #e8f5e9;
-  border-radius: 8px;
-}
-```
-
-### Testing the Flow
-
-1. **Login as admin** and navigate to Email Invites
-2. **Send an invitation** to a test email
-3. **Copy the invite link** from the email (or database)
-4. **Open the link** in your frontend application
-5. **Fill the signup form** and submit
-6. **Verify the invitation** status changes to ACCEPTED in the admin panel
-
----
-
-## 🚀 Production Deployment
-
-### Prerequisites
-
-- Docker & Docker Compose installed
-- Domain name (e.g., `api.example.com`)
-- SSL/TLS certificate (via reverse proxy like Nginx)
-- SMTP credentials for email service
-
-### Step 1: Clone and Configure
-
-```bash
-# Clone repository
-git clone https://github.com/gallantsuri1/miniurl.git
-cd miniurl
-
-# Copy environment file
-cp .env.example .env
-```
-
-### Step 2: Configure Environment Variables
-
-Edit `.env` file with your production values:
-
-```bash
-# ===========================================
-# DATABASE CONFIGURATION
-# ===========================================
-# Generate secure passwords: openssl rand -base64 32
-MYSQL_ROOT_PASSWORD=<generate-secure-password>
-MYSQL_DATABASE=miniurldb
-MYSQL_USER=miniurl_user
-MYSQL_PASSWORD=<generate-secure-password>
-
-# ===========================================
-# JWT CONFIGURATION - REQUIRED
-# ===========================================
-# Generate: openssl rand -base64 64
-APP_JWT_SECRET=<generate-secure-jwt-secret>
-APP_JWT_EXPIRATION_MS=3600000
-
-# ===========================================
-# SMTP CONFIGURATION
-# ===========================================
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=your-email@gmail.com
-SMTP_PASSWORD=your-app-password
-
-# ===========================================
-# APPLICATION CONFIGURATION
-# ===========================================
-# Your API domain (where backend is hosted)
-APP_BASE_URL=https://api.example.com
-
-# CORS - Your frontend domain (where UI is hosted)
-# If frontend and backend are on same domain:
-APP_CORS_ALLOWED_ORIGINS=https://api.example.com
-
-# If frontend is on different domain:
-# APP_CORS_ALLOWED_ORIGINS=https://ui.example.com
-
-# ===========================================
-# SERVER CONFIGURATION
-# ===========================================
-APP_PORT=8080
-```
-
-### Step 3: Start Services
-
-```bash
-# Start MySQL and MyURL
-docker compose up -d
-
-# Check status
-docker compose ps
-
-# Check API service specifically
-docker compose ps miniurl-api
-
-# View logs
-docker compose logs -f miniurl-api
-```
-
-### Step 4: Configure Reverse Proxy (Nginx)
-
-Create `/etc/nginx/sites-available/miniurl-api`:
-
-```nginx
-server {
-    listen 80;
-    server_name api.example.com;
-
-    # Redirect HTTP to HTTPS
-    return 301 https://$server_name$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name api.example.com;
-
-    # SSL Configuration
-    ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-
-    # Security Headers
-    add_header X-Frame-Options DENY;
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    # Proxy to MyURL API
-    location / {
-        proxy_pass http://localhost:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket support (if needed)
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-
-    # Health check endpoint (optional - for monitoring)
-    location /api/health {
-        proxy_pass http://localhost:8080/api/health;
-        access_log off;
-    }
-}
-```
-
-Enable the site:
-
-```bash
-sudo ln -s /etc/nginx/sites-available/miniurl-api /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-### Step 5: Obtain SSL Certificate
-
-```bash
-# Install Certbot
-sudo apt install certbot python3-certbot-nginx
-
-# Obtain certificate
-sudo certbot --nginx -d api.example.com
-
-# Auto-renewal is configured automatically
-```
-
-### Step 6: Verify Deployment
-
-```bash
-# Check health endpoint
-curl https://api.example.com/api/health
-
-# Expected response:
-# {"success":true,"message":"Service is running","data":null}
-```
-
-### Step 7: Initial Setup
-
-1. **Login as admin:**
-   - Use the credentials you configured in `scripts/init-db.sql`
-   - See the **🔑 Admin Credentials Setup** section for details
-   - **⚠️ CHANGE IMMEDIATELY after first login!**
-
-2. **Configure SMTP:**
-   - Ensure email service is working
-   - Test by sending an admin invite
-
-3. **Verify CORS:**
-   - Frontend on `https://api.example.com` should be able to make API calls
-   - Check browser console for CORS errors
-
-### Frontend Integration
-
-Your frontend (running on `api.example.com`) should make API calls to the same domain:
-
-```javascript
-// Example API call from frontend
-const response = await fetch('https://api.example.com/api/auth/login', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({ username, password }),
-});
-```
-
-### API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/auth/login` | POST | Login |
-| `/api/auth/signup` | POST | Register (with invite token) |
-| `/api/auth/verify-email-invite` | GET | Validate invite token |
-| `/api/auth/verify-email` | GET | Validate reset token |
-| `/api/auth/forgot-password` | POST | Request password reset |
-| `/api/auth/reset-password` | POST | Reset password |
-| `/api/features` | GET | Get user's role features |
-| `/api/features/global` | GET | Get global flags (public) |
-| `/api/admin/features` | GET | Get all features (ADMIN) |
-| `/api/self-invite/send` | POST | Send self-invite |
-
-### Limit MySQL Volume Size
-
-Docker doesn't natively limit volume size. Here are the recommended approaches:
-
-**Option 1: File-backed ext4 filesystem (hard limit)**
-
-```bash
-# Create a 100GB sparse file
-truncate -s 100G /opt/mysql-data.img
-
-# Format as ext4
-mkfs.ext4 /opt/mysql-data.img
-
-# Mount it to the Docker volume directory
-mkdir -p /var/lib/docker/volumes/miniurl-api_mysql-data/_data
-mount -o loop /opt/mysql-data.img /var/lib/docker/volumes/miniurl-api_mysql-data/_data
-
-# Make persistent (add to /etc/fstab)
-echo '/opt/mysql-data.img /var/lib/docker/volumes/miniurl-api_mysql-data/_data ext4 loop 0 0' >> /etc/fstab
-```
-
-**Option 2: MySQL-level limits (via `docker-compose-mysql.yml`)**
-
-```yaml
-services:
-  mysql:
-    command: >
-      --max-binlog-size=524288000
-      --binlog-expire-logs-seconds=604800
-      --innodb-data-file-path=ibdata1:12M:autoextend:max:80G
-      --innodb-log-file-size=256M
-      --innodb-buffer-pool-size=1G
-```
-
-This caps: InnoDB data to 80GB, binlog retention to 7 days, buffer pool to 1GB.
-
-### Backup and Restore
-
-Since MySQL runs in its own container, use standard MySQL backup tools:
-
-**Backup:**
-```bash
-mysqldump -h <mysql-host> -u <user> -p miniurldb > backup-$(date +%Y%m%d).sql
-```
-
-**Restore:**
-```bash
-mysql -h <mysql-host> -u <user> -p miniurldb < backup-20260402.sql
-```
-
-### Troubleshooting
-
-**CORS Errors:**
-```bash
-# Check CORS configuration
-docker compose logs miniurl-api | grep -i cors
-
-# Verify APP_CORS_ALLOWED_ORIGINS in .env
-grep APP_CORS_ALLOWED_ORIGINS .env
-```
-
-**Database Connection Issues:**
-```bash
-# Check API service status
-docker compose ps miniurl-api
-
-# View application logs
-docker compose logs miniurl-api
-
-# Verify MySQL connectivity from container
-docker compose exec miniurl-api bash -c 'mysqladmin ping -h <mysql-host> -u <user> -p'
-```
-
-**Application Won't Start:**
-```bash
-# Check application logs
-docker compose logs miniurl-api
-
-# Common issues:
-# - APP_JWT_SECRET not set or too short
-# - Database connection details incorrect
-# - Database not initialized (run scripts/init-db.sql)
-# - Port 8080 already in use
-```
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Create a Pull Request
-
-**Note:** Direct pushes to `main` are blocked. All changes require a PR.
-
-## 📞 Support
-
-For issues or questions, create an issue in the repository.
+## Deployment Documentation
+
+- [Home Server K3s Deployment](docs/deployment/home-server-k3s.md) — Self-hosted runner model, K3s setup, day-2 ops
+- [Local Minikube Development](docs/development/local-minikube.md) — Full walkthrough, hybrid mode, troubleshooting
+- [Initial Environment Bootstrap](docs/deployment/initial-bootstrap.md) — Provision a new environment from scratch
+- [Release Process](docs/deployment/release-process.md) — Full release flow with image promotion
+- [GitHub Actions Reference](docs/deployment/github-actions.md) — All 6 CI/CD workflows explained
+- [Local Docker Compose](docs/deployment/local-docker-compose.md) — Feature development without K8s

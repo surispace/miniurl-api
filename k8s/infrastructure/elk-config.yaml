@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticsearch-config
+  namespace: miniurl
+data:
+  elasticsearch.yml: |
+    cluster.name: miniurl-logs
+    node.name: elasticsearch
+    network.host: 0.0.0.0
+    discovery.type: single-node
+    xpack.security.enabled: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: miniurl
+data:
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    xpack.monitoring.enabled: false
+  logstash.conf: |
+    input {
+      tcp {
+        port => 5000
+        codec => json
+      }
+      kafka {
+        bootstrap_servers => "kafka-service:9092"
+        topics => ["notifications", "clicks"]
+        codec => json
+      }
+    }
+
+    filter {
+      if [type] == "spring-boot" {
+        mutate {
+          add_field => { "service_name" => "%{[spring_application_name]}" }
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch:9200"]
+        index => "miniurl-logs-%{+YYYY.MM.dd}"
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kibana-config
+  namespace: miniurl
+data:
+  kibana.yml: |
+    server.name: kibana
+    server.host: "0.0.0.0"
+    elasticsearch.hosts: ["http://elasticsearch:9200"]
+    xpack.security.enabled: false

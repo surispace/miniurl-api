@@ -1,0 +1,38 @@
+MiniURL has been deployed!
+
+{{- if .Values.ingress.enabled }}
+  Ingress Host: {{ .Values.ingress.host }}
+{{- end }}
+  Namespace:    {{ .Values.namespace }}
+  Image Tag:    {{ .Values.globalConfig.IMAGE_TAG | default "not set (using per-service tags)" }}
+
+{{- if .Values.canary.enabled }}
+  ⚠️  CANARY MODE ACTIVE — {{ .Values.canary.weight }}% traffic
+{{- end }}
+
+Services deployed:
+{{- range $name, $svc := .Values.services }}
+  - {{ $name }} ({{ $svc.replicas }} replicas, image: {{ $svc.image.repository }}:{{ $svc.image.tag }})
+{{- end }}
+
+To check deployment status:
+  kubectl get pods -n {{ .Values.namespace }}
+
+To view logs for a service:
+  kubectl logs -n {{ .Values.namespace }} -l app=<service-name> --tail=50
+
+{{- if .Values.ingress.enabled }}
+To access the API:
+  curl -H "Host: {{ .Values.ingress.host }}" http://<ingress-ip>/api/health
+{{- end }}
+
+{{- if .Values.canary.enabled }}
+To promote canary to next phase:
+  helm upgrade --install {{ .Release.Name }} ./helm/miniurl \
+    --values ./helm/miniurl/values-prod.yaml \
+    --set canary.weight=<next-weight> \
+    --namespace {{ .Values.namespace }}
+
+To rollback canary:
+  helm rollback {{ .Release.Name }} -n {{ .Values.namespace }}
+{{- end }}

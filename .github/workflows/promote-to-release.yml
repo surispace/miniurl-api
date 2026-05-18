@@ -1,0 +1,228 @@
+name: Promote to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Services to promote (comma-separated, empty = all pending)'
+        required: false
+        type: string
+        default: ''
+      version:
+        description: 'Release version (e.g., 1.0.0)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-promote
+  cancel-in-progress: false
+
+env:
+  DOCKER_USER: ${{ secrets.DOCKER_USER }}
+  REGISTRY: docker.io
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ── Gate 1: Release Approval ────────────────────────────────────
+  require-approval:
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      approved_by: ${{ github.actor }}
+    steps:
+      - name: Release approved
+        run: echo "✅ Release approved by ${{ github.actor }}"
+
+  # ── Load Pending Releases ───────────────────────────────────────
+  load-pending:
+    needs: require-approval
+    runs-on: ubuntu-latest
+    outputs:
+      services_json: ${{ steps.load.outputs.services_json }}
+      has_pending: ${{ steps.load.outputs.has_pending }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: load
+        run: |
+          python3 << 'PYTHON'
+          import yaml, json, os
+
+          user_services_input = os.environ.get('USER_SERVICES', '')
+          user_services = [s.strip() for s in user_services_input.split(',') if s.strip()]
+
+          with open('pending-releases.yaml', 'r') as f:
+              data = yaml.safe_load(f) or {'pending': []}
+
+          if user_services:
+              pending = [s for s in data['pending'] if s['service'] in user_services]
+          else:
+              pending = data['pending']
+
+          if not pending:
+              print("has_pending=false")
+              print("No pending releases found")
+              with open(os.environ.get('GITHUB_OUTPUT', ''), 'a') as out:
+                  out.write("has_pending=false\n")
+              exit(0)
+
+          print(f"Promoting {len(pending)} services to release")
+
+          with open('release-services.json', 'w') as f:
+              json.dump(pending, f, indent=2)
+
+          with open(os.environ.get('GITHUB_OUTPUT', ''), 'a') as out:
+              out.write(f"has_pending=true\n")
+              out.write(f"services_json={json.dumps(pending)}\n")
+          PYTHON
+        env:
+          USER_SERVICES: ${{ github.event.inputs.services }}
+
+  # ── Tag Images as Release ───────────────────────────────────────
+  tag-release-images:
+    needs: [require-approval, load-pending]
+    if: needs.load-pending.outputs.has_pending == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_API_TOKEN }}
+
+      - name: Tag dev images as release
+        run: |
+          python3 << 'PYTHON'
+          import json, subprocess, os
+
+          with open('release-services.json', 'r') as f:
+              services = json.load(f)
+
+          version = '${{ github.event.inputs.version }}'
+          docker_user = os.environ.get('DOCKER_USER')
+
+          for svc in services:
+              service = svc['service']
+              dev_tag = svc['dev_tag']
+              release_tag = f'{service}-release-{version}'
+
+              # Pull dev image
+              print(f"Pulling {docker_user}/miniurl-api:{dev_tag}...")
+              subprocess.run(['docker', 'pull', f'{docker_user}/miniurl-api:{dev_tag}'], check=True)
+
+              # Tag as release
+              print(f"Tagging {dev_tag} → {release_tag}")
+              subprocess.run(['docker', 'tag',
+                             f'{docker_user}/miniurl-api:{dev_tag}',
+                             f'{docker_user}/miniurl-api:{release_tag}'], check=True)
+
+              # Push release image
+              print(f"Pushing {release_tag}...")
+              subprocess.run(['docker', 'push', f'{docker_user}/miniurl-api:{release_tag}'], check=True)
+
+              print(f"✅ Tagged {dev_tag} → {release_tag}")
+          PYTHON
+
+  # ── Update Release Tags File ────────────────────────────────────
+  update-release-tags:
+    needs: [require-approval, load-pending, tag-release-images]
+    if: needs.load-pending.outputs.has_pending == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update release-tags.yaml
+        run: |
+          python3 << 'PYTHON'
+          import yaml, json, os
+          from datetime import datetime, timezone
+
+          with open('release-services.json', 'r') as f:
+              services = json.load(f)
+
+          version = '${{ github.event.inputs.version }}'
+          approved_by = '${{ needs.require-approval.outputs.approved_by }}'
+          timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+          release_file = 'release-tags.yaml'
+          if os.path.exists(release_file):
+              with open(release_file, 'r') as f:
+                  data = yaml.safe_load(f) or {'services': {}}
+          else:
+              data = {'services': {}}
+
+          for svc in services:
+              service = svc['service']
+              release_tag = f'{service}-release-{version}'
+
+              if service not in data['services']:
+                  data['services'][service] = {}
+              data['services'][service]['release_tag'] = release_tag
+              data['services'][service]['version'] = version
+              data['services'][service]['releasedAt'] = timestamp
+              data['services'][service]['releasedBy'] = approved_by
+              data['services'][service]['status'] = 'released'
+
+          with open(release_file, 'w') as f:
+              f.write('# Release image tags - promoted from dev\n')
+              yaml.dump(data, f, default_flow_style=False)
+
+          print(f"Updated {len(services)} services in release-tags.yaml")
+          PYTHON
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add release-tags.yaml
+          git commit -m "chore(release): promote to release ${{ github.event.inputs.version }} [skip ci]"
+          git push
+
+  # ── Clear Pending Releases ──────────────────────────────────────
+  clear-pending:
+    needs: [require-approval, load-pending, update-release-tags]
+    if: needs.load-pending.outputs.has_pending == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clear promoted releases from pending
+        run: |
+          python3 << 'PYTHON'
+          import yaml, json
+
+          with open('release-services.json', 'r') as f:
+              promoted = json.load(f)
+          promoted_services = [s['service'] for s in promoted]
+
+          with open('pending-releases.yaml', 'r') as f:
+              data = yaml.safe_load(f) or {'pending': []}
+
+          # Remove promoted services
+          data['pending'] = [s for s in data['pending'] if s['service'] not in promoted_services]
+
+          with open('pending-releases.yaml', 'w') as f:
+              f.write('# Pending releases - awaiting promotion to release\n')
+              yaml.dump(data, f, default_flow_style=False)
+
+          print(f"Cleared {len(promoted_services)} pending releases")
+          PYTHON
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pending-releases.yaml
+          git commit -m "chore(release): clear promoted releases [skip ci]"
+          git push

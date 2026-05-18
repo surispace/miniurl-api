@@ -1,0 +1,134 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+      routes:
+        # Identity Service
+        - id: identity-service
+          uri: lb://identity-service
+          predicates:
+            - Path=/api/auth/**, /api/profile/**, /api/admin/users/**, /api/health
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 10
+                redis-rate-limiter.burstCapacity: 20
+                key-resolver: "#{@userKeyResolver}"
+        
+        # URL Service
+        - id: url-service
+          uri: lb://url-service
+          predicates:
+            - Path=/api/urls/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 20
+                redis-rate-limiter.burstCapacity: 40
+                key-resolver: "#{@userKeyResolver}"
+        
+        # Redirect Service (Hot Path)
+        - id: redirect-service
+          uri: lb://redirect-service
+          predicates:
+            - Path=/r/{code}
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 1000
+                redis-rate-limiter.burstCapacity: 2000
+                key-resolver: "#{@userKeyResolver}"
+        
+        # Feature Service
+        - id: feature-service
+          uri: lb://feature-service
+          predicates:
+            - Path=/api/features/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 10
+                redis-rate-limiter.burstCapacity: 20
+                key-resolver: "#{@userKeyResolver}"
+
+        # Swagger UI — served by the gateway itself (no rate limit; static assets only)
+        - id: swagger-ui
+          uri: lb://api-gateway
+          predicates:
+            - Path=/swagger-ui.html,/swagger-ui/**
+
+        # API docs proxy routes — rewrite path to each service's /v3/api-docs
+        - id: identity-service-docs
+          uri: lb://identity-service
+          predicates:
+            - Path=/v3/api-docs/identity
+          filters:
+            - RewritePath=/v3/api-docs/identity, /v3/api-docs
+
+        - id: url-service-docs
+          uri: lb://url-service
+          predicates:
+            - Path=/v3/api-docs/url
+          filters:
+            - RewritePath=/v3/api-docs/url, /v3/api-docs
+
+        - id: feature-service-docs
+          uri: lb://feature-service
+          predicates:
+            - Path=/v3/api-docs/feature
+          filters:
+            - RewritePath=/v3/api-docs/feature, /v3/api-docs
+
+        - id: redirect-service-docs
+          uri: lb://redirect-service
+          predicates:
+            - Path=/v3/api-docs/redirect
+          filters:
+            - RewritePath=/v3/api-docs/redirect, /v3/api-docs
+
+  # Redis Configuration for Rate Limiting
+  data:
+    redis:
+      host: ${GATEWAY_REDIS_HOST:localhost}
+      port: ${GATEWAY_REDIS_PORT:6379}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka/}
+
+# Security Configuration
+# The Gateway will act as an OAuth2 Resource Server, validating JWTs using the Identity Service's JWKS endpoint
+spring.security.oauth2.resourceserver.jwt.jwk-set-uri: ${IDENTITY_SERVICE_URL:http://identity-service}/.well-known/jwks.json
+
+# Swagger/OpenAPI aggregation — dropdown for all services
+springdoc:
+  swagger-ui:
+    urls:
+      - name: Identity Service
+        url: /v3/api-docs/identity
+      - name: URL Service
+        url: /v3/api-docs/url
+      - name: Feature Service
+        url: /v3/api-docs/feature
+      - name: Redirect Service
+        url: /v3/api-docs/redirect
+    urls-primary-name: Identity Service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always

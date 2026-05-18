@@ -1,0 +1,35 @@
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "miniurl.serviceName" (dict "name" $name "canary" $.Values.canary.enabled) }}-hpa
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" (printf "%s-hpa" $name) "managedBy" "helm") | nindent 4 }}
+    {{- if $.Values.canary.enabled }}
+    canary: "true"
+    {{- end }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "miniurl.serviceName" (dict "name" $name "canary" $.Values.canary.enabled) }}
+  minReplicas: {{ $svc.hpa.minReplicas }}
+  maxReplicas: {{ $svc.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $svc.hpa.cpu | default 70 }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $svc.hpa.memory | default 80 }}
+{{- end }}
+{{- end }}

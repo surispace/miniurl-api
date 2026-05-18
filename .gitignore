@@ -27,6 +27,17 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Secrets (never commit)
+*.pem
+*.key
+*secrets*.yaml
+!helm/**/secrets.yaml
+kubeconfig*
+*.kubeconfig
+
+# Worktrees
+.worktrees/
+
 # Terraform
 *.tfstate
 *.tfstate.lock

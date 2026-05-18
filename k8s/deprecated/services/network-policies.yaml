@@ -1,0 +1,202 @@
+# NetworkPolicy resources for MiniURL microservices.
+# Restricts pod-to-pod communication to only required paths.
+# Uses a permissive initial policy that allows all ingress within the namespace
+# while blocking cross-namespace traffic. This is a safe starting point that
+# can be tightened incrementally as the service topology is validated.
+#
+# NetworkPolicies are P2 (recommended) hardening items per migration-readiness-report.md Section 5.2.
+
+---
+# Default deny-all ingress from other namespaces, allow within namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-cross-namespace
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow all traffic from within the same namespace
+    - from:
+        - podSelector: {}
+    # Allow traffic from the ingress controller / load balancer namespace
+    # (adjust namespace label to match your ingress controller)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+
+---
+# API Gateway: accepts traffic from anywhere (public entry point)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-gateway-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}  # Allow all ingress (public-facing)
+
+---
+# Eureka Server: accepts traffic from all pods in namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eureka-server-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: eureka-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8761
+
+---
+# Identity Service: accepts traffic from API Gateway and other services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: identity-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: identity-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: url-service
+        - podSelector:
+            matchLabels:
+              app: feature-service
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# URL Service: accepts traffic from API Gateway and identity-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: url-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: url-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: identity-service
+        - podSelector:
+            matchLabels:
+              app: redirect-service
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# Redirect Service: accepts traffic from anywhere (public redirect endpoint)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redirect-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: redirect-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: url-service
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Feature Service: accepts traffic from API Gateway and identity-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: feature-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: feature-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: identity-service
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# Notification Service: only accepts Kafka traffic (no HTTP ingress needed)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notification-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: notification-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Analytics Service: only accepts Kafka traffic (no HTTP ingress needed)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: analytics-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: analytics-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080

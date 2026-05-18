@@ -1,0 +1,23 @@
+# Notification Service Configuration - Production Profile
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+logging:
+  level:
+    com.miniurl: INFO
+    org.springframework.web: WARN
+    org.springframework.mail: WARN
+    org.apache.kafka: WARN
+    org.thymeleaf: WARN
+
+# Ensure actuator endpoints remain exposed in production
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,circuitbreakers
+  endpoint:
+    health:
+      show-details: never

@@ -1,0 +1,419 @@
+# MiniURL — Home Server Deployment Guide
+
+This guide walks through deploying MiniURL to a home server running K3s,
+with GitHub Actions deploying via a self-hosted runner installed on the same machine.
+
+## Table of Contents
+
+1. [Hardware Requirements](#1-hardware-requirements)
+2. [OS Setup](#2-os-setup)
+3. [Install K3s](#3-install-k3s)
+4. [Install Helm](#4-install-helm)
+5. [Install GitHub Actions Runner](#5-install-github-actions-runner)
+6. [Configure GitHub Environments & Secrets](#6-configure-github-environments--secrets)
+7. [First Deployment](#7-first-deployment)
+8. [Access the Application](#8-access-the-application)
+9. [Day-2 Operations](#9-day-2-operations)
+10. [Troubleshooting](#10-troubleshooting)
+
+---
+
+## 1. Hardware Requirements
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| CPU | 4 cores | 8 cores |
+| RAM | 8 GB | 16 GB |
+| Disk | 50 GB | 100 GB SSD |
+| Network | Home LAN | Home LAN + static IP |
+| OS | Ubuntu 22.04+ | Ubuntu 24.04 LTS |
+
+The full stack (8 microservices + MySQL × 4 + Kafka + Redis) runs at ~6 GB idle.
+
+## 2. OS Setup
+
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install essentials
+sudo apt install -y curl wget git jq openssl ufw
+
+# Configure firewall
+sudo ufw allow 22/tcp       # SSH
+sudo ufw allow 80/tcp       # HTTP ingress
+sudo ufw allow 443/tcp      # HTTPS ingress
+sudo ufw allow 6443/tcp     # K3s API
+sudo ufw enable
+
+# Disable swap (K3s requirement)
+sudo swapoff -a
+sudo sed -i '/swap/d' /etc/fstab
+```
+
+## 3. Install K3s
+
+K3s is a lightweight Kubernetes distribution ideal for home servers.
+
+```bash
+# Install K3s with Traefik ingress controller
+curl -sfL https://get.k3s.io | sh -s - server \
+  --write-kubeconfig-mode 644
+
+# Verify
+sudo kubectl get nodes
+# Expected: NAME   STATUS   ROLES                  AGE   VERSION
+#           node   Ready    control-plane,master   10s   v1.29.x+k3s1
+
+# Make kubectl available to your user
+mkdir -p $HOME/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+chmod 600 $HOME/.kube/config
+
+# Test
+kubectl get pods -A
+```
+
+## 4. Install Helm
+
+```bash
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version
+```
+
+## 5. Install GitHub Actions Runner
+
+### 5.1 Create a runner user (recommended)
+
+```bash
+sudo useradd -m -s /bin/bash gha-runner
+sudo usermod -aG docker gha-runner     # if Docker is installed
+```
+
+### 5.2 Add runner to K3s config
+
+```bash
+sudo -u gha-runner mkdir -p /home/gha-runner/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml /home/gha-runner/.kube/config
+sudo chown gha-runner:gha-runner /home/gha-runner/.kube/config
+sudo chmod 600 /home/gha-runner/.kube/config
+
+# Test kubectl as runner user
+sudo -u gha-runner kubectl get nodes
+```
+
+### 5.3 Install the runner
+
+In GitHub: **Repo → Settings → Actions → Runners → New self-hosted runner**
+
+Then on the server:
+
+```bash
+# Switch to runner user
+sudo -u gha-runner -i
+
+# Create runner directory
+mkdir -p ~/actions-runner && cd ~/actions-runner
+
+# Download runner (copy the URL from GitHub — example below)
+curl -o actions-runner-linux-x64.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.319.0/actions-runner-linux-x64-2.319.0.tar.gz
+
+tar xzf actions-runner-linux-x64.tar.gz
+
+# Configure (use the token from the GitHub UI)
+./config.sh --url https://github.com/<owner>/miniurl-api \
+  --token <YOUR_RUNNER_TOKEN> \
+  --name home-server \
+  --labels self-hosted,home-server \
+  --unattended
+
+# Install as a service and start
+sudo ./svc.sh install gha-runner
+sudo ./svc.sh start
+
+# Verify it's running
+sudo ./svc.sh status
+```
+
+Back in GitHub: **Settings → Actions → Runners** should show `home-server` as **Idle**.
+
+## 6. Configure GitHub Environments & Secrets
+
+### 6.1 Create Environments
+
+In GitHub: **Repo → Settings → Environments**
+
+Create these environments:
+
+| Environment | Required Reviewers | Wait Timer | Purpose |
+|-------------|-------------------|------------|---------|
+| `development` | None | 0 | Auto-deploy on merge to main |
+| `production` | 1+ reviewers | 0 | Prod deployment with manual approval |
+| `production-canary-10` | 1 reviewer | 0 | Canary phase 1 (10%) |
+| `production-canary-25` | 1 reviewer | 0 | Canary phase 2 (25%) |
+| `production-canary-50` | 1 reviewer | 0 | Canary phase 3 (50%) |
+
+### 6.2 Add Secrets to Each Environment
+
+For the **development** environment:
+
+| Secret Name | Example Value | Notes |
+|-------------|---------------|-------|
+| `DB_ROOT_PASSWORD` | `supersecret123` | MySQL root password |
+| `JWT_SECRET` | `openssl rand -base64 64` | RS256 JWT signing key base64 |
+| `SMTP_HOST` | `smtp.gmail.com` | Email relay for notification-service |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_USERNAME` | `your-email@gmail.com` | SMTP username |
+| `SMTP_PASSWORD` | `app-password` | SMTP password or app password |
+
+For the **production** environment: same secrets, different values.
+
+> **Important:** The self-hosted runner already has kubectl configured (from step 5.2).
+> No `KUBECONFIG` secret is needed — the runner talks directly to the cluster.
+
+### 6.3 GitHub Token Permissions
+
+In **Repo → Settings → Actions → General → Workflow permissions**:
+
+- Select **"Read and write permissions"**
+- Enable **"Allow GitHub Actions to create and approve pull requests"**
+
+## 7. First Deployment
+
+### 7.1 Bootstrap the Infrastructure (one-time)
+
+Go to **Actions → Bootstrap Environment** → Run workflow:
+
+- Environment: `dev`
+- Install infrastructure: `true`
+
+This will:
+1. Create the `miniurl` namespace
+2. Deploy MySQL × 4 (identity, url, feature, analytics)
+3. Deploy Redis (standalone)
+4. Deploy Kafka (single broker)
+5. Create all required Kubernetes Secrets
+6. Create the `ghcr-pull-secret` for pulling images
+7. Deploy all 8 MiniURL services via Helm
+
+**Wait ~15 minutes** for the first run to pull images and start services.
+
+### 7.2 Verify the Deployment
+
+```bash
+kubectl -n miniurl get all
+kubectl -n miniurl get pods -w  # Watch pods start
+```
+
+All pods should show `Running` status.
+
+### 7.3 Trigger Dev Deploy on Push
+
+Now, any push to `main` triggers `deploy-dev.yml` automatically:
+- Builds Docker images on GitHub's `ubuntu-latest` runner
+- Pushes images to `ghcr.io` with `sha-{hash}` tag
+- Deploys to the home K3s cluster via the self-hosted runner
+- `--atomic` ensures auto-rollback on failure
+
+### 7.4 Manual Production Deploy
+
+Go to **Actions → Deploy to Production (Canary)** → Run workflow:
+
+- Image tag: `sha-abc12345` (from a dev deployment that passed smoke tests)
+- Skip canary: `false`
+
+This runs through 4 approval-gated phases:
+1. `production-canary-10` → Deploy canary at 10% → Reviewer approves
+2. `production-canary-25` → Bump to 25% → Reviewer approves
+3. `production-canary-50` → Bump to 50% → Reviewer approves
+4. `production` → Promote to 100%, clean up canary resources
+
+## 8. Access the Application
+
+### 8.1 From the Same Machine
+
+```bash
+# Using cluster DNS (within K3s node)
+GW_IP=$(kubectl -n miniurl get svc api-gateway -o jsonpath='{.spec.clusterIP}')
+curl "http://${GW_IP}/actuator/health"
+
+# Using LoadBalancer (K3s ServiceLB assigns a port)
+# Check the assigned port:
+kubectl -n miniurl get svc api-gateway
+# Look for EXTERNAL-IP and port
+```
+
+### 8.2 From Other Machines on Your LAN
+
+Add to `/etc/hosts` on each client machine:
+
+```
+192.168.1.100  miniurl.local
+```
+
+Replace `192.168.1.100` with your server's LAN IP. Then:
+
+```bash
+# Health check
+curl http://miniurl.local/api/health
+
+# Create a short URL
+curl -X POST http://miniurl.local/api/urls \
+  -H "Content-Type: application/json" \
+  -d '{"longUrl":"https://example.com/very-long-url"}'
+
+# Resolve a short URL
+curl -v http://miniurl.local/r/abc123
+```
+
+### 8.3 From the Internet (Optional)
+
+If your ISP allows and you have a public IP:
+
+1. Set up port forwarding on your router (80 → K3s node IP)
+2. Get a domain name (e.g., `miniurl.example.com`)
+3. Set DNS A record to your public IP
+4. Update `values-home.yaml` ingress host to your domain
+5. Set `ingress.tls: true` and `ingress.clusterIssuer: letsencrypt-prod`
+6. Install cert-manager for automatic TLS certificates
+
+> **Security note for home servers:** If exposing to the internet, ensure strong
+> secrets, enable TLS, and consider a reverse proxy like Cloudflare Tunnel.
+
+## 9. Day-2 Operations
+
+### 9.1 Check Logs
+
+```bash
+# All pods
+kubectl -n miniurl logs -l app=api-gateway --tail=50
+
+# Follow a specific pod
+kubectl -n miniurl logs -f deployment/api-gateway
+```
+
+### 9.2 Manual Rollback
+
+Via GitHub Actions: **Actions → Rollback Deployment** → Run workflow
+
+Or from the CLI:
+
+```bash
+# See history
+helm history miniurl -n miniurl
+
+# Rollback to previous
+helm rollback miniurl -n miniurl --wait
+
+# Rollback to specific revision
+helm rollback miniurl 3 -n miniurl --wait
+```
+
+### 9.3 Restart a Service
+
+```bash
+kubectl -n miniurl rollout restart deployment/url-service
+kubectl -n miniurl rollout status deployment/url-service --timeout=120s
+```
+
+### 9.4 Scale a Service Manually
+
+```bash
+kubectl -n miniurl scale deployment/redirect-service --replicas=2
+```
+
+### 9.5 Update Application Config
+
+1. Edit `helm/miniurl/values-home.yaml` and commit to git
+2. The next deploy picks up the changes
+3. Or manually: `helm upgrade --install miniurl ./helm/miniurl -f helm/miniurl/values-home.yaml --set globalConfig.IMAGE_TAG=sha-<tag> -n miniurl`
+
+### 9.6 Tear Down Everything
+
+```bash
+# Remove the app
+helm uninstall miniurl -n miniurl
+
+# Remove infrastructure (if installed via Helm)
+for db in url identity feature analytics; do
+  helm uninstall mysql-${db} -n miniurl
+done
+helm uninstall redis -n miniurl
+helm uninstall kafka -n miniurl
+
+# Delete namespace
+kubectl delete namespace miniurl
+
+# Uninstall K3s
+sudo /usr/local/bin/k3s-uninstall.sh
+```
+
+## 10. Troubleshooting
+
+### Runner shows "Offline"
+
+```bash
+sudo ./svc.sh status   # Check status
+sudo ./svc.sh restart  # Restart
+# Check logs
+journalctl -u actions.runner.* -f
+```
+
+### Image pull fails with "unauthorized"
+
+```bash
+# Recreate the pull secret
+kubectl -n miniurl delete secret ghcr-pull-secret --ignore-not-found
+kubectl -n miniurl create secret docker-registry ghcr-pull-secret \
+  --docker-server=ghcr.io \
+  --docker-username=<github-user> \
+  --docker-password=<github-pat-with-read:packages> \
+  --docker-email=<email>
+```
+
+### Pod stays in "Pending"
+
+```bash
+kubectl describe pod -n miniurl <pod-name>
+# Common causes: insufficient CPU/memory, no imagePullSecret, PVC not bound
+```
+
+### Out of memory on home server
+
+Reduce resource requests in `values-home.yaml`:
+
+```yaml
+services:
+  api-gateway:
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "200m", memory: "256Mi" }
+```
+
+Apply with `helm upgrade`.
+
+### K3s disk full
+
+```bash
+# Clean old images
+sudo crictl rmi --prune
+
+# Check disk usage
+sudo du -sh /var/lib/rancher/k3s
+```
+
+### Ingress not routing
+
+```bash
+# Check ingress controller pods (K3s uses Traefik by default)
+kubectl -n kube-system get pods | grep traefik
+
+# Check ingress
+kubectl -n miniurl describe ingress miniurl-ingress
+
+# Test bypassing ingress (ClusterIP)
+kubectl -n miniurl port-forward svc/api-gateway 8080:80 &
+curl http://localhost:8080/actuator/health
+```

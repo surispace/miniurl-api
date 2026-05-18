@@ -1,0 +1,203 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version to deploy (e.g., 1.0.0)'
+        required: true
+        type: string
+      services:
+        description: 'Services to deploy (comma-separated, empty = all released)'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Gate 1: Production Approval ─────────────────────────────────
+  require-approval:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      approved_by: ${{ github.actor }}
+    steps:
+      - name: Production approved
+        run: echo "✅ Production deployment approved by ${{ github.actor }}"
+
+  # ── Deploy on Self-Hosted Runner ────────────────────────────────
+  deploy-prod:
+    needs: require-approval
+    runs-on: [self-hosted, home-server]
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — verify runner tools and K3s access
+        run: |
+          echo "=== Runner Preflight ==="
+          echo "--- helm ---"
+          helm version --short 2>/dev/null || { echo "FATAL: helm not found"; exit 1; }
+          echo "--- kubeconfig ---"
+          echo "Current context: $(kubectl config current-context 2>/dev/null || echo 'NOT SET')"
+          echo "--- cluster ---"
+          kubectl cluster-info 2>/dev/null || true
+          kubectl get nodes 2>/dev/null || { echo "FATAL: Cannot access K3s cluster"; exit 1; }
+          echo "=== Preflight PASSED ==="
+
+      - name: Load release tags for selected services
+        id: load
+        run: |
+          python3 << 'PYTHON'
+          import yaml, json, os
+
+          with open('release-tags.yaml', 'r') as f:
+              data = yaml.safe_load(f) or {'services': {}}
+
+          user_services_input = os.environ.get('SERVICES', '')
+          user_services = [s.strip() for s in user_services_input.split(',') if s.strip()]
+
+          version = os.environ.get('VERSION', '')
+
+          # Filter by version and optional service list
+          services = {}
+          for svc_name, svc_config in data['services'].items():
+              if svc_config.get('version') != version:
+                  continue
+              if user_services and svc_name not in user_services:
+                  continue
+              services[svc_name] = svc_config
+
+          if not services:
+              print(f"ERROR: No released services found for version {version}")
+              exit(1)
+
+          with open('prod-deploy-services.json', 'w') as f:
+              json.dump(services, f, indent=2)
+
+          print(f"Deploying {len(services)} services to production: {list(services.keys())}")
+          PYTHON
+        env:
+          SERVICES: ${{ github.event.inputs.services }}
+          VERSION: ${{ github.event.inputs.version }}
+
+      - name: Create image pull secret for Docker Hub
+        run: |
+          kubectl -n miniurl-prod create secret docker-registry dockerhub-pull-secret \
+            --docker-server=docker.io \
+            --docker-username="${{ secrets.DOCKER_USER }}" \
+            --docker-password="${{ secrets.DOCKER_API_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "Docker Hub pull secret created/updated"
+
+      - name: Deploy to Production with Helm (RollingUpdate)
+        run: |
+          python3 << 'PYTHON'
+          import json, subprocess, os
+
+          with open('prod-deploy-services.json', 'r') as f:
+              services = json.load(f)
+
+          # Build helm set arguments for per-service image tags
+          set_args = []
+          for service, config in services.items():
+              release_tag = config.get('release_tag', '')
+              set_args.append(f'--set services.{service}.image.tag={release_tag}')
+
+          helm_cmd = [
+              'helm', 'upgrade', '--install', 'miniurl', './helm/miniurl',
+              '--values', './helm/miniurl/values-prod.yaml',
+          ] + set_args + [
+              '--namespace', 'miniurl-prod',
+              '--create-namespace',
+              '--timeout', '10m',
+              '--wait',
+              '--atomic',
+          ]
+
+          print(f"Running: {' '.join(helm_cmd)}")
+          subprocess.run(helm_cmd, check=True)
+          PYTHON
+
+      - name: Verify deployed services
+        run: |
+          python3 << 'PYTHON'
+          import json, subprocess
+
+          with open('prod-deploy-services.json', 'r') as f:
+              services = json.load(f)
+
+          for service in services.keys():
+              print(f"Checking {service}...")
+              result = subprocess.run(
+                  ['kubectl', '-n', 'miniurl-prod', 'rollout', 'status', f'deployment/{service}', '--timeout=120s'],
+                  capture_output=True, text=True
+              )
+              print(result.stdout)
+              if result.returncode != 0:
+                  print(f"WARNING: {service} rollout status: {result.stderr}")
+          PYTHON
+
+      - name: Smoke test
+        run: |
+          echo "=== Production Smoke Tests ==="
+          kubectl -n miniurl-prod get pods -o wide
+
+          GW_IP=$(kubectl -n miniurl-prod get svc api-gateway -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+          if [ -n "$GW_IP" ]; then
+            echo "--- API Gateway @ ${GW_IP} ---"
+            curl -fsS "http://${GW_IP}/actuator/health" || echo "WARN: Health check failed"
+          fi
+          echo "=== Smoke Test Complete ==="
+
+      - name: Update prod-deployments.yaml
+        run: |
+          python3 << 'PYTHON'
+          import yaml, json, os
+          from datetime import datetime, timezone
+
+          with open('prod-deploy-services.json', 'r') as f:
+              services = json.load(f)
+
+          approved_by = '${{ needs.require-approval.outputs.approved_by }}'
+          version = '${{ github.event.inputs.version }}'
+          timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+          prod_file = 'prod-deployments.yaml'
+          if os.path.exists(prod_file):
+              with open(prod_file, 'r') as f:
+                  data = yaml.safe_load(f) or {'deployments': {}}
+          else:
+              data = {'deployments': {}}
+
+          for service, config in services.items():
+              if service not in data['deployments']:
+                  data['deployments'][service] = {}
+              data['deployments'][service]['version'] = version
+              data['deployments'][service]['deployedAt'] = timestamp
+              data['deployments'][service]['deployedBy'] = approved_by
+              data['deployments'][service]['release_tag'] = config.get('release_tag', '')
+
+          with open(prod_file, 'w') as f:
+              f.write('# Production deployment history\n')
+              yaml.dump(data, f, default_flow_style=False)
+
+          print(f"Updated {len(services)} services in prod-deployments.yaml")
+          PYTHON
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add prod-deployments.yaml
+          git commit -m "chore(prod): deploy release ${{ github.event.inputs.version }} [skip ci]"
+          git push || echo "Push completed (or nothing to push)"

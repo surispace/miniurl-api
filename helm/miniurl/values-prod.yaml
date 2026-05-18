@@ -1,0 +1,64 @@
+# MiniURL — Production environment overrides
+# Usage: helm template miniurl ./helm/miniurl -f ./helm/miniurl/values-prod.yaml
+# IMAGE_TAG is injected by CI via --set globalConfig.IMAGE_TAG=sha-{hash}
+
+globalConfig:
+  SPRING_PROFILES_ACTIVE: "prod"
+  APP_BASE_URL: "http://api.miniurl.com"
+  APP_UI_BASE_URL: "http://miniurl.com"
+  # Docker Hub single-repository for per-service image tags
+  IMAGE_REPOSITORY: "docker.io/surispace/miniurl-api"
+
+services:
+  api-gateway:
+    replicas: 2
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+
+  eureka-server:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  identity-service:
+    replicas: 2
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+
+  url-service:
+    replicas: 2
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+
+  redirect-service:
+    replicas: 3
+    hpa:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 20
+
+  feature-service:
+    replicas: 2
+    hpa:
+      enabled: false
+
+  notification-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  analytics-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+ingress:
+  host: api.miniurl.com
+  tls: true
+  clusterIssuer: letsencrypt-prod

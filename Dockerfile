@@ -1,48 +1,139 @@
-# Build stage
-FROM maven:3.9-eclipse-temurin-17 AS build
+# syntax=docker/dockerfile:1
+FROM maven:3-eclipse-temurin-21 AS base-build
 WORKDIR /app
-
-# Copy pom.xml and download dependencies
 COPY pom.xml .
-RUN mvn dependency:go-offline
+# Copy parent pom and all module poms for reactor resolution
+COPY common/pom.xml common/
+COPY eureka-server/pom.xml eureka-server/
+COPY api-gateway/pom.xml api-gateway/
+COPY identity-service/pom.xml identity-service/
+COPY url-service/pom.xml url-service/
+COPY redirect-service/pom.xml redirect-service/
+COPY feature-service/pom.xml feature-service/
+COPY notification-service/pom.xml notification-service/
+COPY analytics-service/pom.xml analytics-service/
+# Copy common source code (dependency for all services)
+COPY common/src common/src/
+RUN --mount=type=cache,target=/root/.m2 mvn dependency:go-offline -DskipTests || true
 
-# Copy source code and build
-COPY src ./src
-RUN mvn clean package -DskipTests
+# Individual service stages
+FROM base-build AS build-eureka-server
+COPY eureka-server eureka-server/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl eureka-server -DskipTests -am
 
-# Run stage
-FROM eclipse-temurin:17-jre
+FROM base-build AS build-api-gateway
+COPY api-gateway api-gateway/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl api-gateway -DskipTests -am
+
+FROM base-build AS build-identity-service
+COPY identity-service identity-service/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl identity-service -DskipTests -am
+
+FROM base-build AS build-url-service
+COPY url-service url-service/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl url-service -DskipTests -am
+
+FROM base-build AS build-redirect-service
+COPY redirect-service redirect-service/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl redirect-service -DskipTests -am
+
+FROM base-build AS build-feature-service
+COPY feature-service feature-service/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl feature-service -DskipTests -am
+
+FROM base-build AS build-notification-service
+COPY notification-service notification-service/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl notification-service -DskipTests -am
+
+FROM base-build AS build-analytics-service
+COPY analytics-service analytics-service/
+RUN --mount=type=cache,target=/root/.m2 mvn package -pl analytics-service -DskipTests -am
+
+# Runtime stages
+FROM eclipse-temurin:21-jre-alpine AS eureka-server
 WORKDIR /app
-
-# Create logs directory
-RUN mkdir -p /app/logs
-
-# Create non-root user for security
-RUN groupadd -g 1001 appgroup && \
-    useradd -u 1001 -G appgroup -m appuser
-
-# Copy JAR from build stage
-COPY --from=build /app/target/*.jar app.jar
-
-# Set ownership
-RUN chown -R appuser:appgroup /app
-
-# Switch to non-root user
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-eureka-server /app/eureka-server/target/*.jar app.jar
 USER appuser
+EXPOSE 8761
+ENTRYPOINT ["java", "-jar", "app.jar"]
 
-# Expose port
+FROM eclipse-temurin:21-jre-alpine AS api-gateway
+WORKDIR /app
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-api-gateway /app/api-gateway/target/*.jar app.jar
+USER appuser
 EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
 
-# Spring profile (default: prod for Docker deployments)
-ENV SPRING_PROFILES_ACTIVE=prod
+FROM eclipse-temurin:21-jre-alpine AS identity-service
+WORKDIR /app
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-identity-service /app/identity-service/target/*.jar app.jar
+USER appuser
+EXPOSE 8082
+ENTRYPOINT ["java", "-jar", "app.jar"]
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/api/health || exit 1
+FROM eclipse-temurin:21-jre-alpine AS url-service
+WORKDIR /app
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-url-service /app/url-service/target/*.jar app.jar
+USER appuser
+EXPOSE 8081
+ENTRYPOINT ["java", "-jar", "app.jar"]
 
-# JVM options for production
-ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+FROM eclipse-temurin:21-jre-alpine AS redirect-service
+WORKDIR /app
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-redirect-service /app/redirect-service/target/*.jar app.jar
+USER appuser
+EXPOSE 8083
+ENTRYPOINT ["java", "-jar", "app.jar"]
 
-# Run application with configurable Spring profile
-# Usage: docker run -e SPRING_PROFILES_ACTIVE=dev/prod miniurl/miniurl
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+FROM eclipse-temurin:21-jre-alpine AS feature-service
+WORKDIR /app
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-feature-service /app/feature-service/target/*.jar app.jar
+USER appuser
+EXPOSE 8084
+ENTRYPOINT ["java", "-jar", "app.jar"]
+
+FROM eclipse-temurin:21-jre-alpine AS notification-service
+WORKDIR /app
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-notification-service /app/notification-service/target/*.jar app.jar
+USER appuser
+EXPOSE 8085
+ENTRYPOINT ["java", "-jar", "app.jar"]
+
+FROM eclipse-temurin:21-jre-alpine AS analytics-service
+WORKDIR /app
+RUN mkdir -p /app/logs && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
+COPY --from=build-analytics-service /app/analytics-service/target/*.jar app.jar
+USER appuser
+EXPOSE 8086
+ENTRYPOINT ["java", "-jar", "app.jar"]

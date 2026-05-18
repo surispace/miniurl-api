@@ -1,4 +1,4 @@
-name: Build and Publish Docker Image
+name: Release - Publish to Docker Hub & Tag
 
 on:
   push:
@@ -16,11 +16,8 @@ permissions:
   packages: write
   issues: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
-  build-and-publish:
+  validate-and-build:
     runs-on: ubuntu-latest
 
     steps:
@@ -29,26 +26,33 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract tag name
+      - name: Extract version from tag
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "TAG_NAME=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+            TAG_NAME="${{ inputs.tag }}"
           else
-            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
           fi
+          # Strip 'v' prefix: v1.0.0 -> 1.0.0
+          VERSION="${TAG_NAME#v}"
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Verify branch is main or master
         run: |
-          BRANCH=$(git branch -r --contains ${{ github.ref }} | grep -E 'origin/(main|master)' | head -1 || true)
+          BRANCH=$(git branch -r --contains "${{ github.ref }}" | grep -E 'origin/(main|master)' | head -1 || true)
           if [ -z "$BRANCH" ]; then
-            echo "❌ Tag is not on main or master branch. Skipping."
+            echo "Tag is not on main or master branch. Skipping."
             exit 1
           fi
-          echo "✅ Tag is on $BRANCH"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -59,71 +63,66 @@ jobs:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_API_TOKEN }}
 
-      - name: Build and push multi-platform image
-        uses: docker/build-push-action@v5
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USER }}/miniurl-api:${{ steps.tag.outputs.TAG_NAME }}
-            ${{ secrets.DOCKER_USER }}/miniurl-api:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push — individual service images
+        env:
+          VERSION: ${{ steps.tag.outputs.VERSION }}
+        run: |
+          REGISTRY="ghcr.io/${{ github.repository }}"
+          DOCKER_USER="${{ secrets.DOCKER_USER }}"
+          SERVICES="eureka-server api-gateway identity-service url-service redirect-service feature-service notification-service analytics-service"
+
+          for service in $SERVICES; do
+            # Multi-arch build to ghcr.io with version tag + latest
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --target "$service" \
+              --push \
+              --cache-from type=gha \
+              --cache-to type=gha,mode=max \
+              -t "${REGISTRY}/${service}:${VERSION}" \
+              -t "${REGISTRY}/${service}:latest" \
+              -t "${DOCKER_USER}/miniurl-api:${service}-${VERSION}" \
+              .
+          done
 
       - name: Create notification issue
         if: success()
         uses: actions/github-script@v7
         with:
           script: |
-            const tagName = '${{ steps.tag.outputs.TAG_NAME }}';
-            const imageName = `${{ secrets.DOCKER_USER }}/miniurl-api`;
+            const version = '${{ steps.tag.outputs.VERSION }}';
+            const registry = `ghcr.io/${{ github.repository }}`;
+            const services = ['eureka-server','api-gateway','identity-service','url-service','redirect-service','feature-service','notification-service','analytics-service'];
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const imageList = services.map(s => `- \`${registry}/${s}:${version}\``).join('\n');
+            const body = `**Release ${version}** has been built and published!\n\n**Images:**\n${imageList}\n\n🔗 [View Build Log](${runUrl})`;
 
-            const commentBody = `🚀 **Release ${tagName}** has been built and published to Docker Hub!
-
-            **Image:** \`${imageName}:${tagName}\`
-
-            **Pull it:**
-            \`\`\`bash
-            docker pull ${imageName}:${tagName}
-            \`\`\`
-
-            **Run it:**
-            \`\`\`bash
-            docker run -d -p 8080:8080 \\
-              -e SPRING_PROFILES_ACTIVE=prod \\
-              --restart unless-stopped \\
-              ${imageName}:${tagName}
-            \`\`\`
-
-            🔗 [View Build Log](${runUrl})`;
-
-            const actor = context.actor;
-            const issue = await github.rest.issues.create({
+            await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `🐳 Docker image published: ${tagName}`,
-              body: commentBody,
-              labels: ['release', 'docker'],
-              assignees: [actor]
+              title: `Release ${version}: Docker images published`,
+              body: body,
+              labels: ['release', 'docker']
             });
-
-            console.log(`Created issue #${issue.data.number} and assigned to @${actor} — GitHub will email them`);
 
       - name: Notify on failure
         if: failure()
         uses: actions/github-script@v7
         with:
           script: |
-            const tagName = '${{ steps.tag.outputs.TAG_NAME }}';
+            const version = '${{ steps.tag.outputs.VERSION }}';
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `❌ Docker build failed: ${tagName}`,
-              body: `The Docker image build for \`${tagName}\` failed.\n\n🔗 [View Build Log](${runUrl})`,
-              labels: ['release', 'docker', 'failed-build'],
-              assignees: [context.actor]
+              title: `Release failed: ${version}`,
+              body: `The Docker image build for \`${version}\` failed.\n\n🔗 [View Build Log](${runUrl})`,
+              labels: ['release', 'failed-build']
             });

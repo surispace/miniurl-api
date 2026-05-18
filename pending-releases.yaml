@@ -1,0 +1,3 @@
+# Pending releases - awaiting promotion to release
+# Updated by build-and-dev-deploy.yml, cleared by promote-to-release.yml
+pending: []

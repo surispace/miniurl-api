@@ -1,0 +1,8 @@
+# MiniURL — Canary deployment overrides
+# Apply on top of values-prod.yaml to enable canary traffic splitting
+# Usage: helm template miniurl ./helm/miniurl -f ./helm/miniurl/values-prod.yaml -f ./helm/miniurl/values-canary.yaml
+# Adjust weight via --set canary.weight=<N>
+
+canary:
+  enabled: true
+  weight: 10

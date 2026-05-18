@@ -1,0 +1,87 @@
+# Identity Service Configuration
+server:
+  port: 8081
+
+spring:
+  application:
+    name: identity-service
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  
+  # Eureka Client Configuration
+  cloud:
+    eureka:
+      client:
+        serviceUrl:
+          defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka/}
+      instance:
+        prefer-ip-address: true
+
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        # Dead Letter Queue: failed outbox events are sent to a DLQ topic
+        # instead of being retried indefinitely. The DLQ topic is consumed
+        # by a separate process for manual inspection and replay.
+        retries: 3
+        retry.backoff.ms: 1000
+    consumer:
+      group-id: identity-service-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.miniurl.dto"
+
+  # Redis Configuration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+app:
+  # Base URL for email links and redirects
+  base-url: ${APP_BASE_URL:http://localhost:3000}
+  otp:
+    expiry-minutes: 5
+    resend-cooldown-seconds: 60
+  name: ${APP_NAME:MyURL}
+  # CAPTCHA configuration (OWASP ASVS V2.1 — bot detection on auth endpoints)
+  # Provider: none (disabled), recaptcha-v3, or hcaptcha
+  captcha:
+    provider: ${CAPTCHA_PROVIDER:none}
+    secret-key: ${CAPTCHA_SECRET_KEY:}
+    score-threshold: ${CAPTCHA_SCORE_THRESHOLD:0.5}
+
+# JWT RSA Key Configuration
+# Keys are persisted to disk so they survive restarts.
+# On first startup, keys are auto-generated and saved.
+# For production, generate keys externally and mount as secrets.
+jwt:
+  expiration-ms: 3600000
+  rsa:
+    private-key-path: ${JWT_RSA_PRIVATE_KEY_PATH:config/keys/private.pem}
+    public-key-path: ${JWT_RSA_PUBLIC_KEY_PATH:config/keys/public.pem}
+    key-id: ${JWT_RSA_KEY_ID:miniurl-rsa-key-1}
+
+# Swagger/OpenAPI — enabled by default (non-prod)
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  show-actuator: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always

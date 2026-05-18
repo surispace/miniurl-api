@@ -1,31 +1,22 @@
-version: '3.8'
-
 services:
-  mysql:
-    image: mysql:8.0
-    container_name: mysql_db_miniurl
-    restart: unless-stopped
+  db:
+    image: mysql:latest
+    container_name: miniurl-mysql
+    restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-password}
+      MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: miniurldb
-      MYSQL_USER: ${MYSQL_USER:-miniurl}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-miniurlpass}
+      MYSQL_USER: miniurldbuser
+      MYSQL_PASSWORD: rootpass
     ports:
       - "3306:3306"
     volumes:
-      - mysql-data:/var/lib/mysql
+      - miniurl-mysql-volume:/var/lib/mysql
     networks:
       - miniurl-network
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-password}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
 volumes:
-  mysql-data:
-    driver: local
+  miniurl-mysql-volume:
 
 networks:
   miniurl-network:

@@ -1,0 +1,57 @@
+server:
+  port: 8081
+  worker-id: ${SERVER_WORKER_ID:0}
+
+spring:
+  application:
+    name: url-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWK_SET_URI:http://identity-service:8085/.well-known/jwks.json}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+  datasource:
+    url: jdbc:mysql://${URL_DB_HOST:mysql-url}:${URL_DB_PORT:3306}/url_db
+    username: ${URL_DB_USER:root}
+    password: ${URL_DB_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: ${EUREKA_SERVER_URL:http://eureka-server:8761/eureka/}
+
+app:
+  base-url: ${APP_BASE_URL:http://localhost:8080}
+  ui-base-url: ${APP_UI_BASE_URL:http://localhost:3000}
+
+# Swagger/OpenAPI — enabled by default (non-prod)
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  show-actuator: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always

@@ -1,0 +1,262 @@
+name: Deploy to Production (Canary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (sha-{hash})'
+        required: true
+        type: string
+      skip_canary:
+        description: 'Skip canary and deploy directly (emergency only)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # ── Phase 0: Pre-deployment validation ──────────────────────────
+  preflight:
+    name: Pre-flight Checks
+    runs-on: [self-hosted, home-server]
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Preflight — verify runner tools and K3s access
+        run: |
+          echo "=== Runner Preflight ==="
+          echo ""
+          echo "--- kubectl ---"
+          kubectl version --client 2>/dev/null || true
+          echo ""
+          echo "--- helm ---"
+          helm version --short 2>/dev/null || { echo "FATAL: helm not found"; exit 1; }
+          echo ""
+          echo "--- kubeconfig ---"
+          echo "KUBECONFIG: ${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Current context: $(kubectl config current-context 2>/dev/null || echo 'NOT SET')"
+          echo ""
+          echo "--- cluster ---"
+          kubectl cluster-info 2>/dev/null || true
+          kubectl get nodes 2>/dev/null || { echo "FATAL: Cannot access K3s cluster"; exit 1; }
+          echo ""
+          echo "=== Preflight PASSED ==="
+
+      - name: Helm lint & template validation
+        run: |
+          helm lint helm/miniurl
+          helm template miniurl helm/miniurl \
+            -f helm/miniurl/values-home.yaml \
+            --set globalConfig.IMAGE_TAG="${{ github.event.inputs.image_tag }}" > /dev/null
+
+      - name: Capture current revision for rollback
+        id: current
+        run: |
+          CURRENT_REV=$(helm history miniurl -n miniurl --max 1 -o json 2>/dev/null | grep -o '"revision":[0-9]*' | head -1 | cut -d: -f2 || echo "0")
+          echo "current_revision=${CURRENT_REV}" >> $GITHUB_OUTPUT
+          echo "Current revision: ${CURRENT_REV}"
+
+    outputs:
+      current_revision: ${{ steps.current.outputs.current_revision }}
+
+  # ── Phase 1: Deploy canary at 10% ───────────────────────────────
+  canary-10:
+    name: Canary 10%
+    runs-on: [self-hosted, home-server]
+    needs: preflight
+    if: github.event.inputs.skip_canary != 'true'
+    environment:
+      name: production-canary-10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy canary at 10%
+        run: |
+          helm upgrade --install miniurl ./helm/miniurl \
+            --values ./helm/miniurl/values-home.yaml \
+            --values ./helm/miniurl/values-canary.yaml \
+            --set globalConfig.IMAGE_TAG="${{ github.event.inputs.image_tag }}" \
+            --set canary.weight=10 \
+            --namespace miniurl \
+            --timeout 5m \
+            --wait
+
+      - name: Verify canary pods
+        run: |
+          kubectl -n miniurl get pods -l canary=true
+          for deploy in api-gateway-canary redirect-service-canary identity-service-canary; do
+            kubectl -n miniurl rollout status "deployment/${deploy}" --timeout=120s || true
+          done
+
+      - name: Wait for stabilization
+        run: |
+          echo "Waiting 60s for canary stabilization..."
+          sleep 60
+          kubectl -n miniurl get pods -l canary=true
+          kubectl -n miniurl top pods 2>/dev/null || echo "metrics-server may not be running"
+
+  # ── Phase 2: Canary at 25% ──────────────────────────────────────
+  canary-25:
+    name: Canary 25%
+    runs-on: [self-hosted, home-server]
+    needs: canary-10
+    if: github.event.inputs.skip_canary != 'true'
+    environment:
+      name: production-canary-25
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Bump canary to 25%
+        run: |
+          helm upgrade --install miniurl ./helm/miniurl \
+            --values ./helm/miniurl/values-home.yaml \
+            --values ./helm/miniurl/values-canary.yaml \
+            --set globalConfig.IMAGE_TAG="${{ github.event.inputs.image_tag }}" \
+            --set canary.weight=25 \
+            --namespace miniurl \
+            --timeout 5m \
+            --wait
+
+      - name: Wait for stabilization
+        run: |
+          echo "Waiting 60s for canary stabilization..."
+          sleep 60
+          kubectl -n miniurl get pods -l canary=true
+
+  # ── Phase 3: Canary at 50% ──────────────────────────────────────
+  canary-50:
+    name: Canary 50%
+    runs-on: [self-hosted, home-server]
+    needs: canary-25
+    if: github.event.inputs.skip_canary != 'true'
+    environment:
+      name: production-canary-50
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Bump canary to 50%
+        run: |
+          helm upgrade --install miniurl ./helm/miniurl \
+            --values ./helm/miniurl/values-home.yaml \
+            --values ./helm/miniurl/values-canary.yaml \
+            --set globalConfig.IMAGE_TAG="${{ github.event.inputs.image_tag }}" \
+            --set canary.weight=50 \
+            --namespace miniurl \
+            --timeout 5m \
+            --wait
+
+      - name: Wait for stabilization
+        run: |
+          echo "Waiting 60s for canary stabilization..."
+          sleep 60
+          kubectl -n miniurl get pods -l canary=true
+
+  # ── Phase 4: Full promotion (100%) ──────────────────────────────
+  promote:
+    name: Promote to 100%
+    runs-on: [self-hosted, home-server]
+    needs: canary-50
+    if: github.event.inputs.skip_canary != 'true'
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Promote — disable canary, deploy stable
+        run: |
+          helm upgrade --install miniurl ./helm/miniurl \
+            --values ./helm/miniurl/values-home.yaml \
+            --set globalConfig.IMAGE_TAG="${{ github.event.inputs.image_tag }}" \
+            --set canary.enabled=false \
+            --namespace miniurl \
+            --timeout 5m \
+            --wait
+
+      - name: Verify stable deployments
+        run: |
+          kubectl -n miniurl get all
+          for service in api-gateway eureka-server identity-service url-service redirect-service feature-service notification-service analytics-service; do
+            echo "Checking ${service}..."
+            kubectl -n miniurl rollout status "deployment/${service}" --timeout=120s || true
+          done
+
+      - name: Clean up canary resources
+        run: |
+          kubectl -n miniurl delete deployment -l canary=true --ignore-not-found
+          kubectl -n miniurl delete service -l canary=true --ignore-not-found
+          kubectl -n miniurl delete hpa -l canary=true --ignore-not-found
+          kubectl -n miniurl delete ingress miniurl-canary-ingress --ignore-not-found
+
+      - name: Smoke test
+        run: |
+          GW_IP=$(kubectl -n miniurl get svc api-gateway -o jsonpath='{.spec.clusterIP}')
+          if [ -n "$GW_IP" ]; then
+            curl -fsS "http://${GW_IP}/actuator/health" || echo "WARN: Health check failed"
+            curl -fsS "http://${GW_IP}/.well-known/jwks.json" | head -c 100 || echo "WARN: JWKS failed"
+          fi
+
+      - name: Print access info
+        run: |
+          echo "============================================"
+          echo "  Production Promotion Complete"
+          echo "============================================"
+          echo "Tag: ${{ github.event.inputs.image_tag }}"
+          echo ""
+          echo "Services:"
+          kubectl -n miniurl get svc
+          echo ""
+          echo "Access: http://miniurl.local/api/health"
+
+  # ── Direct deploy (skip canary — emergency) ─────────────────────
+  deploy-direct:
+    name: Direct Deploy (No Canary)
+    runs-on: [self-hosted, home-server]
+    needs: preflight
+    if: github.event.inputs.skip_canary == 'true'
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy directly
+        run: |
+          helm upgrade --install miniurl ./helm/miniurl \
+            --values ./helm/miniurl/values-home.yaml \
+            --set globalConfig.IMAGE_TAG="${{ github.event.inputs.image_tag }}" \
+            --set canary.enabled=false \
+            --namespace miniurl \
+            --timeout 5m \
+            --wait \
+            --atomic
+
+      - name: Verify deployments
+        run: |
+          kubectl -n miniurl get all
+          for service in api-gateway eureka-server identity-service url-service redirect-service feature-service notification-service analytics-service; do
+            kubectl -n miniurl rollout status "deployment/${service}" --timeout=120s || true
+          done
+
+      - name: Print access info
+        run: |
+          echo "============================================"
+          echo "  Direct Production Deploy Complete"
+          echo "============================================"
+          echo "Tag: ${{ github.event.inputs.image_tag }}"
+          kubectl -n miniurl get pods

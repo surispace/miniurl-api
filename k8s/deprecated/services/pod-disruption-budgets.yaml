@@ -1,0 +1,93 @@
+# PodDisruptionBudget resources for all MiniURL microservices.
+# Ensures a minimum number of pods remain available during voluntary disruptions
+# (node drains, cluster autoscaler scale-down, rolling updates).
+#
+# PDBs are P2 (recommended) hardening items per migration-readiness-report.md Section 5.2.
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: identity-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: identity-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: url-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: url-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redirect-service-pdb
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redirect-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: feature-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: feature-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: notification-service-pdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: notification-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: analytics-service-pdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: analytics-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eureka-server-pdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: eureka-server

@@ -1,0 +1,231 @@
+# Kubernetes Infrastructure Manifests for MyURL Microservices
+# Apply with: kubectl apply -f k8s/infrastructure/
+
+---
+# ============================================
+# ELASTICSEARCH
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  namespace: miniurl
+  labels:
+    app: elasticsearch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      containers:
+        - name: elasticsearch
+          image: elasticsearch:8.12.0
+          ports:
+            - containerPort: 9200
+            - containerPort: 9300
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: xpack.security.enabled
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1"
+          volumeMounts:
+            - name: data-volume
+              mountPath: /usr/share/elasticsearch/data
+      volumes:
+        - name: data-volume
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: miniurl
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+  type: ClusterIP
+
+---
+# ============================================
+# LOGSTASH
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: miniurl
+  labels:
+    app: logstash
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+        - name: logstash
+          image: logstash:8.12.0
+          ports:
+            - containerPort: 5000
+            - containerPort: 9600
+          env:
+            - name: LS_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /usr/share/logstash/pipeline
+            - name: config-dir
+              mountPath: /usr/share/logstash/config
+      volumes:
+        - name: config-volume
+          configMap:
+            name: logstash-config
+            items:
+              - key: logstash.conf
+                path: logstash.conf
+        - name: config-dir
+          configMap:
+            name: logstash-config
+            items:
+              - key: logstash.yml
+                path: logstash.yml
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: miniurl
+spec:
+  selector:
+    app: logstash
+  ports:
+    - port: 5000
+      targetPort: 5000
+      name: logstash
+  type: ClusterIP
+
+---
+# ============================================
+# KIBANA
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: miniurl
+  labels:
+    app: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: kibana:8.12.0
+          ports:
+            - containerPort: 5601
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: "http://elasticsearch:9200"
+            - name: XPACK_SECURITY_ENABLED
+              value: "false"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          dependsOn:
+            - elasticsearch
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: miniurl
+spec:
+  selector:
+    app: kibana
+  ports:
+    - port: 5601
+      targetPort: 5601
+  type: LoadBalancer
+
+---
+# ============================================
+# ELK CONFIGURATION
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: miniurl
+data:
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    xpack.monitoring.enabled: false
+  logstash.conf: |
+    input {
+      tcp {
+        port => 5000
+        codec => json
+      }
+      kafka {
+        bootstrap_servers => "kafka-service:9092"
+        topics => ["notifications", "clicks"]
+        codec => json
+      }
+    }
+
+    filter {
+      if [type] == "spring-boot" {
+        mutate {
+          add_field => { "service_name" => "%{[spring_application_name]}" }
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch:9200"]
+        index => "miniurl-logs-%{+YYYY.MM.dd}"
+      }
+    }

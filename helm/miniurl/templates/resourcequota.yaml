@@ -1,0 +1,14 @@
+{{- if .Values.resourceQuota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ .Release.Name }}-quota
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "resourcequota") | nindent 4 }}
+spec:
+  hard:
+    {{- with .Values.resourceQuota.limits }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

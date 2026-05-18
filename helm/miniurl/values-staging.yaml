@@ -1,0 +1,62 @@
+# MiniURL — Staging environment overrides
+# Usage: helm template miniurl ./helm/miniurl -f ./helm/miniurl/values-staging.yaml --set globalConfig.IMAGE_TAG=sha-{hash}
+# Staging mirrors production config with reduced replicas and letsencrypt-staging certs
+
+globalConfig:
+  SPRING_PROFILES_ACTIVE: "staging"
+  APP_BASE_URL: "https://staging.api.miniurl.com"
+  APP_UI_BASE_URL: "https://staging.miniurl.com"
+
+services:
+  api-gateway:
+    replicas: 2
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 4
+
+  eureka-server:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  identity-service:
+    replicas: 2
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 3
+
+  url-service:
+    replicas: 2
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 4
+
+  redirect-service:
+    replicas: 2
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+
+  feature-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  notification-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  analytics-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+ingress:
+  host: staging.api.miniurl.com
+  tls: true
+  clusterIssuer: letsencrypt-staging

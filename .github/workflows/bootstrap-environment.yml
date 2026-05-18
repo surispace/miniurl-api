@@ -1,0 +1,165 @@
+name: Bootstrap Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to bootstrap'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      install_infra:
+        description: 'Install infrastructure (MySQL, Kafka, Redis)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap ${{ github.event.inputs.environment }}
+    runs-on: [self-hosted, home-server]
+    environment:
+      name: ${{ github.event.inputs.environment == 'prod' && 'production' || 'development' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Preflight — verify runner tools and K3s access
+        run: |
+          echo "=== Runner Preflight ==="
+          echo ""
+          echo "--- kubectl ---"
+          kubectl version --client 2>/dev/null || true
+          echo ""
+          echo "--- helm ---"
+          helm version --short 2>/dev/null || { echo "FATAL: helm not found"; exit 1; }
+          echo ""
+          echo "--- kubeconfig ---"
+          echo "KUBECONFIG: ${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Current context: $(kubectl config current-context 2>/dev/null || echo 'NOT SET')"
+          echo ""
+          echo "--- cluster ---"
+          kubectl cluster-info 2>/dev/null || true
+          kubectl get nodes 2>/dev/null || { echo "FATAL: Cannot access K3s cluster"; exit 1; }
+          echo ""
+          echo "=== Preflight PASSED ==="
+
+      - name: Create namespace
+        run: |
+          kubectl create namespace miniurl --dry-run=client -o yaml | kubectl apply -f -
+          echo "Namespace miniurl ready"
+
+      - name: Create secrets
+        run: |
+          kubectl -n miniurl create secret generic db-secrets \
+            --from-literal=MYSQL_ROOT_PASSWORD="${{ secrets.DB_ROOT_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n miniurl create secret generic jwt-rsa-keys \
+            --from-literal=jwt-secret="${{ secrets.JWT_SECRET }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n miniurl create secret generic smtp-credentials \
+            --from-literal=SMTP_HOST="${{ secrets.SMTP_HOST }}" \
+            --from-literal=SMTP_PORT="${{ secrets.SMTP_PORT }}" \
+            --from-literal=SMTP_USERNAME="${{ secrets.SMTP_USERNAME }}" \
+            --from-literal=SMTP_PASSWORD="${{ secrets.SMTP_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Secrets created/updated"
+
+      - name: Create image pull secret for ghcr.io
+        run: |
+          kubectl -n miniurl create secret docker-registry ghcr-pull-secret \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GITHUB_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "Image pull secret created"
+
+      - name: Add Helm repositories
+        if: github.event.inputs.install_infra == 'true'
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami --force-update
+          helm repo update
+
+      - name: Install infrastructure
+        if: github.event.inputs.install_infra == 'true'
+        run: |
+          for db in url identity feature analytics; do
+            helm upgrade --install "mysql-${db}" bitnami/mysql \
+              --namespace miniurl \
+              --set auth.rootPassword="${{ secrets.DB_ROOT_PASSWORD }}" \
+              --set auth.database="${db}_db" \
+              --set primary.persistence.size=5Gi \
+              --set primary.resources.requests.memory=256Mi \
+              --wait --timeout 10m
+          done
+
+          helm upgrade --install redis bitnami/redis \
+            --namespace miniurl \
+            --set architecture=standalone \
+            --set auth.enabled=false \
+            --set master.persistence.size=1Gi \
+            --set master.resources.requests.memory=128Mi \
+            --wait --timeout 5m
+
+          helm upgrade --install kafka bitnami/kafka \
+            --namespace miniurl \
+            --set replicaCount=1 \
+            --set persistence.size=5Gi \
+            --set resources.requests.memory=512Mi \
+            --wait --timeout 10m
+
+          echo "Infrastructure installed"
+
+      - name: Install MiniURL application
+        run: |
+          # Bootstrap uses an initial image. Pull a known-good SHA or use the latest dev tag.
+          # For a fresh cluster, deploy first with a real sha tag via deploy-dev.yml after bootstrap.
+          # This step creates the Helm release so deploy-dev can upgrade it later.
+          if helm status miniurl -n miniurl >/dev/null 2>&1; then
+            echo "Release already exists, skipping initial install"
+          else
+            echo "No existing release — install placeholder to establish Helm state"
+            helm upgrade --install miniurl ./helm/miniurl \
+              --values ./helm/miniurl/values-home.yaml \
+              --namespace miniurl \
+              --create-namespace \
+              --timeout 5m \
+              --wait 2>&1 || echo "WARN: Initial install may fail without valid IMAGE_TAG — run deploy-dev to push real images"
+          fi
+
+      - name: Verify deployments (if installed)
+        run: |
+          kubectl -n miniurl get all || echo "No resources yet — run deploy-dev to deploy actual images"
+          for service in api-gateway eureka-server identity-service url-service redirect-service feature-service notification-service analytics-service; do
+            if kubectl -n miniurl get deployment "${service}" >/dev/null 2>&1; then
+              echo "Checking ${service}..."
+              kubectl -n miniurl rollout status "deployment/${service}" --timeout=120s || true
+            fi
+          done
+
+      - name: Print access info
+        run: |
+          echo "============================================"
+          echo "  Bootstrap Complete — ${{ github.event.inputs.environment }}"
+          echo "============================================"
+          kubectl -n miniurl get pods 2>/dev/null || echo "No pods yet"
+          kubectl -n miniurl get svc 2>/dev/null || echo "No services yet"
+          echo ""
+          echo "Next steps:"
+          echo "  1. Push to main to trigger deploy-dev (auto-build + deploy)"
+          echo "  2. Or run deploy-dev manually with an image tag"
+          echo ""
+          echo "Add to your /etc/hosts:"
+          echo "  <server-ip>  miniurl.local"
+          echo ""
+          echo "Access: http://miniurl.local/api/health"

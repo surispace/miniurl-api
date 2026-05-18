@@ -1,0 +1,316 @@
+# Multi-stage Dockerfile for MyURL Microservices
+# Usage: docker build -f Dockerfile.multi --target <service> -t miniurl/<service>:latest .
+
+# ============================================
+# Base Build Stage - Common Dependencies
+# ============================================
+FROM maven:3.9-eclipse-temurin-17 AS build-base
+WORKDIR /build
+
+# Copy parent pom.xml first for dependency caching
+COPY pom.xml .
+COPY common/pom.xml common/
+
+# Download common dependencies
+RUN mvn dependency:go-offline -f common/pom.xml -B
+
+# Copy service pom.xml files
+COPY api-gateway/pom.xml api-gateway/
+COPY eureka-server/pom.xml eureka-server/
+COPY identity-service/pom.xml identity-service/
+COPY url-service/pom.xml url-service/
+COPY redirect-service/pom.xml redirect-service/
+COPY feature-service/pom.xml feature-service/
+COPY notification-service/pom.xml notification-service/
+COPY analytics-service/pom.xml analytics-service/
+
+# Download all service dependencies
+RUN mvn dependency:go-offline -B
+
+# ============================================
+# API Gateway Service
+# ============================================
+FROM build-base AS build-api-gateway
+WORKDIR /build/api-gateway
+
+COPY api-gateway/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY api-gateway/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-api-gateway
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-api-gateway /build/api-gateway/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8080
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+
+# ============================================
+# Eureka Server Service
+# ============================================
+FROM build-base AS build-eureka-server
+WORKDIR /build/eureka-server
+
+COPY eureka-server/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY eureka-server/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-eureka-server
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-eureka-server /build/eureka-server/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8761
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8761/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+
+# ============================================
+# Identity Service
+# ============================================
+FROM build-base AS build-identity-service
+WORKDIR /build/identity-service
+
+COPY identity-service/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY identity-service/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-identity-service
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-identity-service /build/identity-service/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8081
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8081/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+
+# ============================================
+# URL Service
+# ============================================
+FROM build-base AS build-url-service
+WORKDIR /build/url-service
+
+COPY url-service/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY url-service/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-url-service
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-url-service /build/url-service/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8081
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8081/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+
+# ============================================
+# Redirect Service
+# ============================================
+FROM build-base AS build-redirect-service
+WORKDIR /build/redirect-service
+
+COPY redirect-service/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY redirect-service/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-redirect-service
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-redirect-service /build/redirect-service/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8082
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8082/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+
+# ============================================
+# Feature Service
+# ============================================
+FROM build-base AS build-feature-service
+WORKDIR /build/feature-service
+
+COPY feature-service/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY feature-service/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-feature-service
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-feature-service /build/feature-service/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8083
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8083/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+
+# ============================================
+# Notification Service
+# ============================================
+FROM build-base AS build-notification-service
+WORKDIR /build/notification-service
+
+COPY notification-service/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY notification-service/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-notification-service
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-notification-service /build/notification-service/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8082
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8082/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]
+
+# ============================================
+# Analytics Service
+# ============================================
+FROM build-base AS build-analytics-service
+WORKDIR /build/analytics-service
+
+COPY analytics-service/pom.xml .
+COPY common/pom.xml ../common/
+COPY common/src ../common/src
+
+RUN mvn dependency:go-offline -B
+
+COPY analytics-service/src ./src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre AS runtime-analytics-service
+WORKDIR /app
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -G appgroup -m appuser
+
+COPY --from=build-analytics-service /build/analytics-service/target/*.jar app.jar
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8083
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8083/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$SPRING_PROFILES_ACTIVE -jar app.jar"]

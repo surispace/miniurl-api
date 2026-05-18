@@ -1,0 +1,23 @@
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "miniurl.serviceName" (dict "name" $name "canary" $.Values.canary.enabled) }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" $name "managedBy" "helm") | nindent 4 }}
+    {{- if $.Values.canary.enabled }}
+    canary: "true"
+    {{- end }}
+spec:
+  type: {{ $svc.serviceType | default "ClusterIP" }}
+  selector:
+    app: {{ include "miniurl.serviceName" (dict "name" $name "canary" $.Values.canary.enabled) }}
+  ports:
+  {{- range $svc.ports }}
+  - name: {{ .name }}
+    port: {{ .servicePort | default .containerPort }}
+    targetPort: {{ .containerPort }}
+  {{- end }}
+{{- end }}

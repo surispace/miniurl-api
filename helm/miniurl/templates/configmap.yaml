@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: global-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "miniurl.labels" (dict "name" "global-config" "managedBy" "helm") | nindent 4 }}
+data:
+  {{- range $key, $val := .Values.globalConfig }}
+  {{- if and (ne $key "IMAGE_TAG") (ne $key "SPRING_PROFILES_ACTIVE") }}
+  {{ $key }}: {{ $val | quote }}
+  {{- end }}
+  {{- end }}
+  SPRING_PROFILES_ACTIVE: {{ .Values.globalConfig.SPRING_PROFILES_ACTIVE | default "prod" | quote }}

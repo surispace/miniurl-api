@@ -1,0 +1,56 @@
+# MiniURL — Development environment overrides
+# Usage: helm template miniurl ./helm/miniurl -f ./helm/miniurl/values-dev.yaml
+# IMAGE_TAG is injected by CI via --set globalConfig.IMAGE_TAG=sha-{hash}
+
+globalConfig:
+  SPRING_PROFILES_ACTIVE: "dev"
+  APP_BASE_URL: "http://dev.api.miniurl.com"
+  APP_UI_BASE_URL: "http://dev.miniurl.com"
+  # Docker Hub single-repository for per-service image tags
+  IMAGE_REPOSITORY: "docker.io/surispace/miniurl-api"
+
+services:
+  api-gateway:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  eureka-server:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  identity-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  url-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  redirect-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  feature-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  notification-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+  analytics-service:
+    replicas: 1
+    hpa:
+      enabled: false
+
+ingress:
+  host: dev.api.miniurl.com
+  tls: true
+  clusterIssuer: letsencrypt-staging

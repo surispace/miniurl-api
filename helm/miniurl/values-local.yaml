@@ -1,0 +1,277 @@
+# MiniURL — Local Minikube development overrides
+# Usage: helm upgrade --install miniurl ./helm/miniurl -f ./helm/miniurl/values-local.yaml -n miniurl-local --create-namespace
+#
+# Prerequisites:
+#   eval $(minikube docker-env)
+#   ./scripts/local/minikube-build-images.sh
+
+namespace: miniurl-local
+
+globalConfig:
+  SPRING_PROFILES_ACTIVE: "local"
+  APP_BASE_URL: "http://miniurl.local"
+  APP_UI_BASE_URL: "http://miniurl.local"
+  EUREKA_SERVER_URL: "http://eureka-server:8761/eureka/"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  MYSQL_URL_HOST: "mysql-url"
+  MYSQL_URL_PORT: "3306"
+  MYSQL_URL_DB: "url_db"
+  MYSQL_IDENTITY_HOST: "mysql-identity"
+  MYSQL_IDENTITY_PORT: "3306"
+  MYSQL_IDENTITY_DB: "identity_db"
+  MYSQL_FEATURE_HOST: "mysql-feature"
+  MYSQL_FEATURE_PORT: "3306"
+  MYSQL_FEATURE_DB: "feature_db"
+  MYSQL_ANALYTICS_HOST: "mysql-analytics"
+  MYSQL_ANALYTICS_PORT: "3306"
+  MYSQL_ANALYTICS_DB: "analytics_db"
+
+services:
+  api-gateway:
+    replicas: 1
+    image:
+      repository: miniurl/api-gateway
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8080
+        servicePort: 80
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8080
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+
+  eureka-server:
+    replicas: 1
+    image:
+      repository: miniurl/eureka-server
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8761
+        servicePort: 8761
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8761
+        initialDelaySeconds: 90
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8761
+        initialDelaySeconds: 60
+        periodSeconds: 10
+
+  identity-service:
+    replicas: 1
+    image:
+      repository: miniurl/identity-service
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8081
+        servicePort: 8081
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8081
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8081
+        initialDelaySeconds: 30
+        periodSeconds: 10
+
+  url-service:
+    replicas: 1
+    image:
+      repository: miniurl/url-service
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8081
+        servicePort: 8081
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8081
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8081
+        initialDelaySeconds: 30
+        periodSeconds: 10
+
+  redirect-service:
+    replicas: 1
+    image:
+      repository: miniurl/redirect-service
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8082
+        servicePort: 8082
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8082
+        initialDelaySeconds: 30
+        periodSeconds: 10
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8082
+        initialDelaySeconds: 15
+        periodSeconds: 5
+
+  feature-service:
+    replicas: 1
+    image:
+      repository: miniurl/feature-service
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8083
+        servicePort: 8083
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8083
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8083
+        initialDelaySeconds: 30
+        periodSeconds: 10
+
+  notification-service:
+    replicas: 1
+    image:
+      repository: miniurl/notification-service
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8082
+        servicePort: 8082
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    probes:
+      liveness:
+        httpGet:
+          path: /actuator/health
+          port: 8082
+        initialDelaySeconds: 60
+        periodSeconds: 15
+      readiness:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8082
+        initialDelaySeconds: 30
+        periodSeconds: 10
+
+  analytics-service:
+    replicas: 1
+    image:
+      repository: miniurl/analytics-service
+      tag: local
+      pullPolicy: Never
+    ports:
+      - name: http
+        containerPort: 8083
+        servicePort: 8083
+    serviceType: ClusterIP
+    hpa:
+      enabled: false
+    resources:
+      requests: { cpu: "100m", memory: "512Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+
+ingress:
+  enabled: true
+  host: miniurl.local
+  className: nginx
+  tls: false
+  clusterIssuer: ""
+  sslRedirect: "false"
+
+networkPolicy:
+  enabled: false
+
+resourceQuota:
+  enabled: false
+
+pdb:
+  enabled: false
+
+serviceAccount:
+  create: false

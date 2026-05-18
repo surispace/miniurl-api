@@ -1,55 +1,288 @@
 version: '3.8'
 
 services:
-  # MyURL API Application
-  miniurl-api:
-    image: ${DOCKER_IMAGE:-gallantsuri1/miniurl-api:v1.0.0}
-    container_name: miniurl-api
-    restart: unless-stopped
+  # --- Service Discovery ---
+  eureka-server:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: eureka-server
+    container_name: eureka-server
     ports:
-      - "${APP_PORT:-8080}:8080"
+      - "8761:8761"
     environment:
-      # Server Configuration
-      SERVER_PORT: 8080
-
-      # Database Configuration - REQUIRED (MySQL runs in its own container)
-      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL}
-      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME}
-      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD}
-
-      # ⚠️ JWT Configuration - REQUIRED: Set APP_JWT_SECRET in .env
-      # Application will FAIL TO START without a valid JWT secret
-      APP_JWT_SECRET: ${APP_JWT_SECRET}
-      APP_JWT_EXPIRATION_MS: 3600000
-
-      # SMTP Configuration (Email)
-      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USERNAME: ${SMTP_USERNAME:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-
-      # Application Configuration
-      APP_BASE_URL: ${APP_BASE_URL:-https://api.example.com}
-      APP_UI_BASE_URL: ${APP_UI_BASE_URL:-https://example.com}
-      APP_OTP_EXPIRY_MINUTES: 15
-
-      # CORS Configuration - REQUIRED for frontend access
-      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-https://ui.example.com}
-
-      # Spring Profile
-      SPRING_PROFILES_ACTIVE: prod
-
-      # JVM Options
-      JAVA_OPTS: "-Xms256m -Xmx512m -XX:+UseG1GC"
+      - SPRING_PROFILES_ACTIVE=dev
+      - EUREKA_CLIENT_REGISTER_WITH_EUREKA=false
+      - EUREKA_CLIENT_FETCH_REGISTRY=false
     networks:
       - miniurl-network
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      test: ["CMD", "curl", "-f", "http://localhost:8761/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Message Broker (Kafka) ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - miniurl-network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - miniurl-network
+
+  # --- Distributed Cache & Rate Limiting ---
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - miniurl-network
+
+  # --- Physical Database Split ---
+  mysql-identity:
+    image: mysql:8.0
+    container_name: mysql-identity
+    ports:
+      - "33061:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: identity_db
+    volumes:
+      - identity_db_data:/var/lib/mysql
+    networks:
+      - miniurl-network
+
+  mysql-url:
+    image: mysql:8.0
+    container_name: mysql-url
+    ports:
+      - "33062:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: url_db
+    volumes:
+      - url_db_data:/var/lib/mysql
+    networks:
+      - miniurl-network
+
+  mysql-feature:
+    image: mysql:8.0
+    container_name: mysql-feature
+    ports:
+      - "33063:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: feature_db
+    volumes:
+      - feature_db_data:/var/lib/mysql
+    networks:
+      - miniurl-network
+
+  # --- API Gateway ---
+  api-gateway:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: api-gateway
+    container_name: api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - GATEWAY_REDIS_HOST=redis
+      - GATEWAY_REDIS_PORT=6379
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - IDENTITY_SERVICE_URL=http://identity-service:8081
+    depends_on:
+      - eureka-server
+      - redis
+    networks:
+      - miniurl-network
+
+  # --- Identity Service ---
+  identity-service:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: identity-service
+    container_name: identity-service
+    ports:
+      - "8082:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql-identity:3306/identity_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=root
+    depends_on:
+      - eureka-server
+      - kafka
+      - mysql-identity
+    networks:
+      - miniurl-network
+
+  # --- URL Service ---
+  url-service:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: url-service
+    container_name: url-service
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SERVER_WORKER_ID=1
+      - APP_BASE_URL=http://localhost:8080
+      - APP_UI_BASE_URL=http://localhost:3000
+    depends_on:
+      - eureka-server
+      - kafka
+      - mysql-url
+    networks:
+      - miniurl-network
+
+  # --- Redirect Service ---
+  redirect-service:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: redirect-service
+    container_name: redirect-service
+    ports:
+      - "8083:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - REDIRECT_REDIS_HOST=redis
+      - REDIRECT_REDIS_PORT=6379
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      - eureka-server
+      - redis
+      - kafka
+    networks:
+      - miniurl-network
+
+  # --- Feature Service ---
+  feature-service:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: feature-service
+    container_name: feature-service
+    ports:
+      - "8084:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+    depends_on:
+      - eureka-server
+      - redis
+      - mysql-feature
+    networks:
+      - miniurl-network
+
+  # --- Notification Service ---
+  notification-service:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: notification-service
+    container_name: notification-service
+    ports:
+      - "8085:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      - eureka-server
+      - kafka
+    networks:
+      - miniurl-network
+
+  # --- Analytics Service ---
+  analytics-service:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: analytics-service
+    container_name: analytics-service
+    ports:
+      - "8086:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - MYSQL_ANALYTICS_HOST=mysql-url
+      - MYSQL_ANALYTICS_PORT=3306
+      - MYSQL_ANALYTICS_USER=root
+      - MYSQL_ANALYTICS_PASSWORD=root
+    depends_on:
+      - eureka-server
+      - kafka
+      - mysql-url
+    networks:
+      - miniurl-network
+
+  # --- Monitoring ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - miniurl-network
+    depends_on:
+      - eureka-server
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - miniurl-network
+    depends_on:
+      - prometheus
 
 networks:
   miniurl-network:
-    external: true
+    driver: bridge
+
+volumes:
+  identity_db_data:
+  url_db_data:
+  feature_db_data:
+  prometheus_data:
+  grafana_data:
