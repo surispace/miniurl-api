@@ -181,6 +181,12 @@ The system uses **RS256 (Asymmetric)** JWTs for secure, stateless authentication
 2. **Public Key Distribution**: `identity-service` exposes a `/.well-known/jwks.json` endpoint containing the **Public Key**.
 3. **Token Validation**: `api-gateway` fetches the public key from the JWKS endpoint and validates incoming tokens without calling the Identity Service for every request.
 
+### JWT Claims & Zero-Trust Passthrough ✅ (Implemented)
+
+JWT tokens carry enriched claims (`userId`, `username`, `roles`, `tokenVersion`) enabling each service to independently identify the authenticated user without trusting gateway-set headers. This follows **Pattern B: JWT Passthrough (Zero-Trust)** — every service validates the JWT against the JWKS endpoint and extracts user context directly from the claims.
+
+See [`plans/jwt-claims-enrichment-plan.md`](plans/jwt-claims-enrichment-plan.md) for the full design, implementation phases, and verification checklist.
+
 Secrets are managed via Kubernetes Secrets — never stored in values files or committed to the repository. CI/CD workflows inject secrets at deploy time from GitHub Environment secrets.
 
 ---
